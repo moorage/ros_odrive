@@ -4,50 +4,50 @@ This package serves as a hardware interface to control ODrives from [ros2_contro
 
 It assumes that the ODrive is already configured and calibrated (see [docs](https://docs.odriverobotics.com/v/latest/guides/getting-started.html) for details).
 
-**This is a work in progress** (see **Features**).
-
 ## Usage
 
-For a high level usage example, see the [BotWheel Explorer ROS2 Package](../odrive_botwheel_explorer/README.md).
+Load `odrive_ros2_control_plugin/ODriveHardwareInterface` as a ros2_control `SystemInterface` plugin. Each joint maps to an ODrive S1 axis defined by `odrive_node_id` and (optional) `odrive_axis_index`.
 
-## Features
+## Highlights
 
-- Communicates over Linux SocketCAN
-- Position Control (with optional velocity and torque feedforward)
-- Velocity Control (with optional torque feedforward)
-- Torque Control
-- Automatic control mode selection (based on which Command Interfaces are claimed by the ros2_control Controller)
-- Position, velocity and torque Feedback
-- Multiple ODrives
-
-**TODO:**
-
-- Error feedback & error handling: If an ODrive disarms for some reason (e.g. undervoltage), the application that connects to ros2_control will currently not be notified.
-- Other telemetry: Additional data like temperatures, DC voltage, etc. are currently not propagated through ros2_control up to the application.
-
+- SocketCAN transport with per-axis routing and configurable interface name.
+- Command interfaces: position, velocity, effort; state interfaces mirror these plus diagnostics.
+- Command-mode switching with validation so only one control mode is active per joint.
+- Mixed joint types (revolute/continuous/prismatic) with gear or lead-screw reduction; transmissions are detected when present.
+- Fault monitoring from heartbeat/error fields, explicit clear-errors and homing services, and HardwareStatus + diagnostics output.
+- Optional limit-consistency checks between URDF limits and ODrive-reported limits (STRICT / WARN_ONLY / OFF).
+- CAN command de-duplication to reduce bus load and basic heartbeat timeout detection.
 
 ## Parameters
 
 Top level:
 
-- `can`: Name of the CAN interface to run on
+- `can_interface` (or `can`): CAN interface device (e.g. `can0`).
+- `status_publish_rate`: HardwareStatus publish rate [Hz].
+- `heartbeat_timeout`: timeout for stale heartbeats [s].
+- `command_tolerance`: threshold for resending unchanged commands.
+- `limits_check.mode`: `OFF|WARN_ONLY|STRICT` plus tolerance ratios (`limits_check.velocity_tolerance_ratio`, `limits_check.effort_tolerance_ratio`, `limits_check.acceleration_tolerance_ratio`).
 
 Per joint:
 
-- `node_id`: `node_id` of the ODrive
+- `odrive_node_id` (or `node_id`)
+- `odrive_axis_index` (default 0)
+- Optional: `gear_ratio`, `lead_screw_pitch`, `torque_constant`, `max_velocity`, `max_effort`, `max_acceleration`.
 
 ## Command Interfaces
 
-(from ros2_control Controller to ODrive)
+Controllers may claim one of:
 
 - `position`
 - `velocity`
-- `effort` (aka Torque)
+- `effort` (torque/current)
 
 ## State Interfaces
 
-(from ODrive to ros2_control Controller)
-
 - `position`
 - `velocity`
-- `effort` (aka Torque)
+- `effort`
+
+## Tests
+
+Unit and integration tests live under `test/` and are driven with `ament_cmake_gtest`, covering mapping/transmissions, mode switching, limit consistency, fault handling, and CAN routing with a simulated transport.
