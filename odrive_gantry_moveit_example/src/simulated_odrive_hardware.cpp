@@ -13,10 +13,23 @@ using odrive_ros2_control::OdriveS1CanSystem;
 
 namespace odrive_gantry_moveit_example {
 
+/**
+ * @brief A simulated CAN transport for ODrive.
+ *
+ * This class mocks the behavior of a real CAN bus connection to ODrive(s).
+ * It maintains the state of simulated axes and updates their physics in the poll() loop.
+ */
 class SimulatedOdriveTransport final : public CanTransport {
 public:
   SimulatedOdriveTransport() = default;
 
+  /**
+   * @brief Initializes the transport.
+   *
+   * @param interface_name The name of the CAN interface (unused in simulation).
+   * @param cb Callback function to handle incoming CAN frames from the "drive".
+   * @return true always.
+   */
   bool init(const std::string &, std::function<void(const can_frame &)> cb) override {
     callback_ = std::move(cb);
     last_update_ = std::chrono::steady_clock::now();
@@ -25,6 +38,14 @@ public:
 
   void shutdown() override { axes_.clear(); }
 
+  /**
+   * @brief Sends a CAN frame to the simulated drive.
+   *
+   * Parses the frame to update the simulated axis state (control mode, targets, etc.).
+   *
+   * @param frame The CAN frame to send.
+   * @return true if the callback is registered, false otherwise.
+   */
   bool send(const can_frame &frame) override {
     if (!callback_) return false;
     const uint32_t axis_id = frame.can_id >> 5;
@@ -91,6 +112,13 @@ public:
     return true;
   }
 
+  /**
+   * @brief Updates the simulation physics and sends feedback frames.
+   *
+   * This method should be called periodically. It calculates the new position/velocity
+   * based on the control mode and limits, then invokes the callback with status messages
+   * (Heartbeat, Encoder Estimates, Torques).
+   */
   void poll() override {
     if (!callback_) return;
     const auto now = std::chrono::steady_clock::now();
@@ -105,11 +133,14 @@ public:
       if (axis.mode == AxisMode::POSITION) {
         const double error = axis.target_position - axis.position;
         // Simple critically damped position loop toward the target.
+        // Simple critically damped position loop toward the target.
+        // This simulates the internal position control loop of the ODrive.
         desired_vel = std::clamp(error * position_gain_, -velocity_limit, velocity_limit);
       }
 
       const double dv = desired_vel - axis.velocity;
       const double max_delta = accel_limit * dt;
+      // Apply acceleration limit to velocity change
       if (std::abs(dv) > max_delta) {
         axis.velocity += (dv > 0 ? 1.0 : -1.0) * max_delta;
       } else {
@@ -117,6 +148,7 @@ public:
       }
       axis.velocity = std::clamp(axis.velocity, -velocity_limit, velocity_limit);
 
+      // Integrate velocity to get position
       axis.position += axis.velocity * dt;
 
       Heartbeat_msg_t hb{};
@@ -173,6 +205,12 @@ private:
   const double position_gain_ = 8.0;          // simple P gain in turns/s per turn
 };
 
+/**
+ * @brief Hardware interface for Simulated ODrive.
+ *
+ * This plugin allows ros2_control to operate against a simulated ODrive
+ * without requiring physical hardware or a real CAN interface.
+ */
 class SimulatedOdriveHardware final : public OdriveS1CanSystem {
 public:
   SimulatedOdriveHardware() : OdriveS1CanSystem([]() {

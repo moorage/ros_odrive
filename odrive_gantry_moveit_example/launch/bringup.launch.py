@@ -1,3 +1,14 @@
+"""
+Launch file for the ODrive Gantry MoveIt example.
+
+This launch file brings up the entire robot system, including:
+- Robot State Publisher (URDF)
+- ros2_control node (Hardware Interface)
+- MoveIt 2 (Move Group)
+- Controllers (Joint State Broadcaster, Gantry Controller)
+
+It supports both simulated hardware (default) and real ODrive hardware via CAN.
+"""
 import os
 import yaml
 
@@ -11,6 +22,12 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    """
+    Generate the LaunchDescription for the ODrive Gantry.
+
+    Returns:
+        LaunchDescription: The launch description containing all nodes and arguments.
+    """
     use_sim_hw = LaunchConfiguration("use_simulated_odrive")
     can_iface = LaunchConfiguration("can_interface")
 

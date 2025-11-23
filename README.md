@@ -3,9 +3,10 @@
 This repository contains ROS2 packages for the [ODrive motor controller](https://odriverobotics.com):
 
 - **`odrive_node`**: Standalone ROS2 node for communication with ODrives via CAN bus. → [More info](odrive_node/README.md)
-- **`odrive_ros2_control`**: [work in progress] [ros2_control](https://control.ros.org/master/index.html) integration for communication with ODrives via CAN bus.
+- **`odrive_ros2_control`**: [ros2_control](https://control.ros.org/master/index.html) hardware interface for ODrive S1/Pro/Micro via CAN bus. Supports Position, Velocity, and Effort modes with configurable limits and mechanical reductions.
    → [More info](odrive_ros2_control/README.md)
 - **`odrive_botwheel_explorer`**: Example for using the `odrive_ros2_control` package in the context of the [ODrive BotWheel Explorer](https://shop.odriverobotics.com/products/botwheel-explorer). → [More info](odrive_botwheel_explorer/README.md)
+- **`odrive_gantry_moveit_example`**: A complete MoveIt 2 example for a 2-DOF gantry + yaw wrist robot, demonstrating ODrive integration with `ros2_control`. → [More info](odrive_gantry_moveit_example/README.md)
 
 `odrive_node` and `odrive_ros2_control` are two alternative approaches and cannot be used at the same time.
 

@@ -1,4 +1,4 @@
-name: CI
+name: ODrive ROS2 Control CI
 
 on:
   pull_request:
@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ros:humble-ros-base
+    defaults:
+      run:
+        working-directory: odrive_ros2_control
     steps:
       - name: Checkout
         uses: actions/checkout@v4

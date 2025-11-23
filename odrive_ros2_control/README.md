@@ -4,63 +4,88 @@ This package serves as a hardware interface to control ODrives from [ros2_contro
 
 It assumes that the ODrive is already configured and calibrated (see [docs](https://docs.odriverobotics.com/v/latest/guides/getting-started.html) for details).
 
-## Usage
+## Features
 
-Load `odrive_ros2_control_plugin/ODriveHardwareInterface` as a ros2_control `SystemInterface` plugin. Each joint maps to an ODrive S1 axis defined by `odrive_node_id` and (optional) `odrive_axis_index`.
+- **SocketCAN Transport**: Per-axis routing with configurable interface name.
+- **Control Modes**: Position, Velocity, Effort (Torque/Current).
+- **State Feedback**: Position, Velocity, Effort, plus diagnostics.
+- **Safety**:
+  - Command-mode switching validation.
+  - Fault monitoring (heartbeat, errors).
+  - Limit consistency checks (URDF vs ODrive).
+  - CAN command de-duplication.
+- **Joint Types**: Revolute, Continuous, Prismatic.
+- **Transmissions**: Automatic detection of gear/lead-screw reductions.
 
-## Highlights
+## File Overview
 
-- SocketCAN transport with per-axis routing and configurable interface name.
-- Command interfaces: position, velocity, effort; state interfaces mirror these plus diagnostics.
-- Command-mode switching with validation so only one control mode is active per joint.
-- Mixed joint types (revolute/continuous/prismatic) with gear or lead-screw reduction; transmissions are detected when present.
-- Fault monitoring from heartbeat/error fields, explicit clear-errors and homing services, and HardwareStatus + diagnostics output.
-- Optional limit-consistency checks between URDF limits and ODrive-reported limits (STRICT / WARN_ONLY / OFF).
-- CAN command de-duplication to reduce bus load and basic heartbeat timeout detection.
+- `include/odrive_ros2_control/odrive_system.hpp`: Main hardware interface class definition.
+- `src/odrive_hardware_interface.cpp`: Implementation of the `SystemInterface` plugin.
+- `test/unit_logic_test.cpp`: Unit tests for logic (mode switching, limits, etc.).
+- `test/integration_can_test.cpp`: Integration tests using a fake CAN transport.
+- `odrive_hardware_interface.xml`: Plugin export definition.
 
 ## Parameters
 
-Top level:
+### Global Parameters
+These are set at the top level of the hardware interface in URDF.
 
-- `can_interface` (or `can`): CAN interface device (e.g. `can0`).
-- `status_publish_rate`: HardwareStatus publish rate [Hz].
-- `heartbeat_timeout`: timeout for stale heartbeats [s].
-- `command_tolerance`: threshold for resending unchanged commands.
-- `limits_check.mode`: `OFF|WARN_ONLY|STRICT` plus tolerance ratios (`limits_check.velocity_tolerance_ratio`, `limits_check.effort_tolerance_ratio`, `limits_check.acceleration_tolerance_ratio`).
+- `can_interface` (string): CAN interface name (e.g., `can0`).
+- `status_publish_rate` (double): Rate [Hz] to publish `HardwareStatus`.
+- `heartbeat_timeout` (double): Timeout [s] for stale heartbeats.
+- `command_tolerance` (double): Threshold for resending unchanged commands.
+- `limits_check.mode` (string): `OFF`, `WARN_ONLY`, or `STRICT`.
+- `limits_check.velocity_tolerance_ratio` (double): Tolerance ratio for velocity limits.
+- `limits_check.effort_tolerance_ratio` (double): Tolerance ratio for effort limits.
+- `limits_check.acceleration_tolerance_ratio` (double): Tolerance ratio for acceleration limits.
 
-Per joint:
+### Per-Joint Parameters
+These are set for each joint in the URDF.
 
-- `odrive_node_id` (or `node_id`)
-- `odrive_axis_index` (default 0)
-- Optional: `gear_ratio`, `lead_screw_pitch`, `torque_constant`, `max_velocity`, `max_effort`, `max_acceleration`.
+- `odrive_node_id` (int): CAN node ID of the ODrive axis.
+- `odrive_axis_index` (int, default 0): Axis index on the ODrive (0 or 1).
+- `gear_ratio` (double, optional): Mechanical reduction ratio.
+- `lead_screw_pitch` (double, optional): Pitch for prismatic joints.
+- `torque_constant` (double, optional): Torque constant [Nm/A].
+- `max_velocity` (double, optional): Max velocity limit.
+- `max_effort` (double, optional): Max effort limit.
+- `max_acceleration` (double, optional): Max acceleration limit.
 
-## Command Interfaces
+## Usage
 
-Controllers may claim one of:
+Load `odrive_ros2_control_plugin/ODriveHardwareInterface` as a ros2_control `SystemInterface` plugin.
 
-- `position`
-- `velocity`
-- `effort` (torque/current)
+### URDF Example
 
-## State Interfaces
-
-- `position`
-- `velocity`
-- `effort`
+```xml
+<ros2_control name="ODriveSystem" type="system">
+  <hardware>
+    <plugin>odrive_ros2_control_plugin/ODriveHardwareInterface</plugin>
+    <param name="can_interface">can0</param>
+    <param name="heartbeat_timeout">0.5</param>
+  </hardware>
+  <joint name="joint1">
+    <param name="odrive_node_id">10</param>
+    <param name="odrive_axis_index">0</param>
+    <command_interface name="position"/>
+    <command_interface name="velocity"/>
+    <command_interface name="effort"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+    <state_interface name="effort"/>
+  </joint>
+</ros2_control>
+```
 
 ## Tests
 
-Unit and integration tests live under `test/` and are driven with `ament_cmake_gtest`, covering mapping/transmissions, mode switching, limit consistency, fault handling, and CAN routing with a simulated transport.
+Unit and integration tests are provided to ensure reliability.
 
-### Running tests locally
+### Running Tests Locally
 
 In a ROS 2 Humble workspace:
 
 ```bash
-source /opt/ros/humble/setup.sh
-mkdir -p ws/src
-rsync -a . ws/src/ros_odrive
-cd ws
 colcon build --merge-install --cmake-args -DBUILD_TESTING=ON
 colcon test --merge-install
 colcon test-result --verbose
@@ -68,4 +93,4 @@ colcon test-result --verbose
 
 ### CI
 
-GitHub Actions (`.github/workflows/ci.yml`) builds and runs the unit/integration test suite inside `ros:humble-ros-base` on every push/PR, ensuring canonical behavior stays covered.
+GitHub Actions (`.github/workflows/ci.yml`) runs the test suite on every push/PR.

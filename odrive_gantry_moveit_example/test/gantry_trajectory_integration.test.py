@@ -1,3 +1,9 @@
+"""
+Integration test for the ODrive Gantry.
+
+This test launches the full robot stack (simulated) and verifies that the
+gantry can execute a trajectory using the FollowJointTrajectory action.
+"""
 import os
 import time
 
@@ -21,6 +27,12 @@ from rclpy.duration import Duration
 
 @pytest.mark.launch_test
 def generate_test_description():
+    """
+    Generate the launch description for the integration test.
+
+    Returns:
+        tuple: (LaunchDescription, dict) containing the test launch description and context.
+    """
     pkg_share = FindPackageShare("odrive_gantry_moveit_example")
     xacro_path = PathJoinSubstitution([pkg_share, "description", "urdf", "gantry.urdf.xacro"])
     controllers = PathJoinSubstitution([pkg_share, "config", "ros2_controllers.yaml"])
@@ -67,6 +79,12 @@ def generate_test_description():
 
 
 class TrajectoryHarness:
+    """
+    Test harness for sending trajectories and verifying robot state.
+
+    This class wraps the ActionClient for FollowJointTrajectory and the subscription
+    to /joint_states to make testing easier.
+    """
     def __init__(self, node: RclpyNode):
         self._node = node
         self._latest_state = None
@@ -120,6 +138,15 @@ class TrajectoryHarness:
 
 @pytest.mark.launch_test
 def test_gantry_executes_trajectory(launch_service, control_node, proc_output):
+    """
+    Test that the gantry can execute a simple trajectory.
+
+    Steps:
+    1. Wait for the action server to be ready.
+    2. Send a goal with two points.
+    3. Wait for the goal to complete.
+    4. Verify the final pose matches the target within tolerance.
+    """
     rclpy.init()
     try:
         node = rclpy.create_node("gantry_traj_tester")
