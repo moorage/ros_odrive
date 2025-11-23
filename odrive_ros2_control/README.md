@@ -7,15 +7,15 @@ It assumes that the ODrive is already configured and calibrated (see [docs](http
 ## Features
 
 - **SocketCAN Transport**: Per-axis routing with configurable interface name.
-- **Control Modes**: Position, Velocity, Effort (Torque/Current).
-- **State Feedback**: Position, Velocity, Effort, plus diagnostics.
+- **Control Modes**: Position, Velocity, Effort (Torque/Current), Homing trigger.
+- **State Feedback**: Position, Velocity, Effort, plus diagnostics and homing status.
 - **Safety**:
   - Command-mode switching validation.
   - Fault monitoring (heartbeat, errors).
   - Limit consistency checks (URDF vs ODrive).
   - CAN command de-duplication.
 - **Joint Types**: Revolute, Continuous, Prismatic.
-- **Transmissions**: Automatic detection of gear/lead-screw reductions.
+- **Transmissions**: Automatic detection of gear/lead-screw reductions (invalid ratios rejected).
 
 ## File Overview
 
@@ -44,8 +44,8 @@ These are set for each joint in the URDF.
 
 - `odrive_node_id` (int): CAN node ID of the ODrive axis.
 - `odrive_axis_index` (int, default 0): Axis index on the ODrive (0 or 1).
-- `gear_ratio` (double, optional): Mechanical reduction ratio.
-- `lead_screw_pitch` (double, optional): Pitch for prismatic joints.
+- `gear_ratio` (double, optional): Mechanical reduction ratio (must be > 0 if provided or implied by a transmission).
+- `lead_screw_pitch` (double, optional): Pitch for prismatic joints (must be > 0 if provided).
 - `torque_constant` (double, optional): Torque constant [Nm/A].
 - `max_velocity` (double, optional): Max velocity limit.
 - `max_effort` (double, optional): Max effort limit.
@@ -70,9 +70,16 @@ Load `odrive_ros2_control_plugin/ODriveHardwareInterface` as a ros2_control `Sys
     <command_interface name="position"/>
     <command_interface name="velocity"/>
     <command_interface name="effort"/>
+    <command_interface name="homing"/><!-- >0.5 triggers homing for this joint -->
     <state_interface name="position"/>
     <state_interface name="velocity"/>
     <state_interface name="effort"/>
+    <state_interface name="homing_status"/><!-- 0 unknown,1 requested,2 success,3 failed -->
+    <state_interface name="health"/>
+    <state_interface name="axis_state"/>
+    <state_interface name="power_state"/>
+    <state_interface name="fault_code"/>
+    <state_interface name="heartbeat_age"/>
   </joint>
 </ros2_control>
 ```

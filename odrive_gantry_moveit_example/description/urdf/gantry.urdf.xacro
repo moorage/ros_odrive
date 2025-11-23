@@ -3,9 +3,11 @@
   <xacro:arg name="prefix" default=""/>
   <xacro:arg name="use_simulated_odrive" default="true"/>
   <xacro:arg name="can_interface" default="can0"/>
+  <!-- Allow the caller to pass the share path so we don't rely on $(find ...) -->
+  <xacro:arg name="pkg_share" default="$(find-pkg-share odrive_gantry_moveit_example)"/>
 
-  <xacro:include filename="$(find odrive_gantry_moveit_example)/urdf/gantry_description.urdf.xacro"/>
-  <xacro:include filename="$(find odrive_gantry_moveit_example)/urdf/gantry.ros2_control.xacro"/>
+  <xacro:include filename="${pkg_share}/urdf/gantry_description.urdf.xacro"/>
+  <xacro:include filename="${pkg_share}/urdf/gantry.ros2_control.xacro"/>
 
   <xacro:planar_gantry prefix="$(arg prefix)"/>
   <xacro:gantry_ros2_control

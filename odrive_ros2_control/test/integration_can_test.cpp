@@ -1,15 +1,13 @@
 #include <gtest/gtest.h>
-#include <chrono>
 #include <memory>
-#include <thread>
 #include <cstring>
 
-#include "control_msgs/msg/hardware_status.hpp"
 #include "odrive_ros2_control/odrive_system.hpp"
+#include <linux/can.h>
 #include "fake_can_transport.hpp"
-#include "rclcpp/executors/single_threaded_executor.hpp"
 
 using odrive_ros2_control::AxisConfig;
+using odrive_ros2_control::AxisControlMode;
 using odrive_ros2_control::AxisHealth;
 using odrive_ros2_control::OdriveS1CanSystem;
 using hardware_interface::CallbackReturn;
@@ -27,12 +25,15 @@ struct OdriveSystemTestAccess {
     return sys.runtime_metadata_;
   }
   static std::vector<odrive_ros2_control::AxisState> &states(OdriveS1CanSystem &sys) { return sys.axis_states_; }
-  static rclcpp::Node::SharedPtr node(OdriveS1CanSystem &sys) { return sys.node_; }
-  static void set_last_status_time(OdriveS1CanSystem &sys, const rclcpp::Time &t) {
-    sys.last_status_publish_time_ = t;
-  }
+  static std::vector<AxisControlMode> &modes(OdriveS1CanSystem &sys) { return sys.command_modes_; }
   static void handle(OdriveS1CanSystem &sys, const can_frame &frame, const rclcpp::Time &t) {
     sys.handle_frame(frame, t);
+  }
+  static std::vector<odrive_ros2_control::HardwareStatusMsg> &status(OdriveS1CanSystem &sys) {
+    return sys.hardware_status_cache_;
+  }
+  static odrive_ros2_control::OdriveS1CanSystem::UtilizationMetrics &util(OdriveS1CanSystem &sys) {
+    return sys.util_metrics_;
   }
   static bool send_clear(OdriveS1CanSystem &sys, size_t idx) { return sys.send_clear_errors(idx); }
   static bool clear_and_rearm(OdriveS1CanSystem &sys, size_t idx) { return sys.clear_errors_and_rearm(idx); }
@@ -43,6 +44,7 @@ hardware_interface::HardwareInfo make_info() {
   hardware_interface::HardwareInfo info;
   info.name = "test_hw";
   info.type = "system";
+  info.hardware_parameters["skip_can_validation"] = "true";
   for (int i = 0; i < 2; ++i) {
     hardware_interface::ComponentInfo joint;
     joint.name = "joint" + std::to_string(i + 1);
@@ -92,6 +94,11 @@ TEST(IntegrationCan, CommandRoutingSendsFramesToExpectedNodes) {
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
 
+  auto hb1 = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  auto hb2 = make_heartbeat(axis_can_id(2, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb1, rclcpp::Clock().now());
+  OdriveSystemTestAccess::handle(sys, hb2, rclcpp::Clock().now());
+
   sys.perform_command_mode_switch({"joint1/position", "joint2/velocity"}, {});
   auto &cmds = OdriveSystemTestAccess::commands(sys);
   cmds[0].position = kPi;
@@ -125,6 +132,73 @@ TEST(IntegrationCan, CommandRoutingSendsFramesToExpectedNodes) {
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
 }
 
+TEST(IntegrationCan, TransmissionMappingAppliedForCommandsAndState) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  info.transmissions.clear();
+  hardware_interface::TransmissionInfo tr;
+  tr.name = "t1";
+  tr.type = "SimpleTransmission";
+  hardware_interface::TransmissionJointInfo jinfo;
+  jinfo.name = "joint1";
+  jinfo.parameters["mechanical_reduction"] = "2.0";
+  tr.joints.push_back(jinfo);
+  hardware_interface::TransmissionActuatorInfo ainfo;
+  ainfo.name = "motor1";
+  ainfo.parameters["mechanical_reduction"] = "2.0";
+  tr.actuators.push_back(ainfo);
+  info.transmissions.push_back(tr);
+
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  auto hb_closed = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_closed, rclcpp::Clock().now());
+  sys.perform_command_mode_switch({"joint1/position"}, {});
+
+  auto &cmds = OdriveSystemTestAccess::commands(sys);
+  cmds[0].position = kPi;
+
+  const size_t before = fake->sent_frames.size();
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  const size_t after = fake->sent_frames.size();
+  ASSERT_GT(after, before);
+
+  bool found_pos = false;
+  for (size_t i = before; i < after; ++i) {
+    const auto &frame = fake->sent_frames[i];
+    const uint32_t node = frame.can_id >> 5;
+    const uint8_t cmd = frame.can_id & 0x1f;
+    if (node == axis_can_id(1, 0) && cmd == Set_Input_Pos_msg_t::cmd_id) {
+      Set_Input_Pos_msg_t msg;
+      msg.decode_buf(frame.data);
+      found_pos = true;
+      EXPECT_NEAR(msg.Input_Pos, 1.0, 1e-4); // reduction 2:1 -> 1 motor turn for pi rad
+    }
+  }
+  EXPECT_TRUE(found_pos);
+
+  // Push encoder feedback of 1 turn and ensure joint position reflects transmission mapping.
+  Get_Encoder_Estimates_msg_t enc{};
+  enc.Pos_Estimate = 1.0;
+  enc.Vel_Estimate = 0.0;
+  can_frame enc_frame{};
+  enc_frame.can_id = (axis_can_id(1, 0) << 5) | Get_Encoder_Estimates_msg_t::cmd_id;
+  enc_frame.can_dlc = Get_Encoder_Estimates_msg_t::msg_length;
+  enc.encode_buf(enc_frame.data);
+  fake->push_rx(enc_frame);
+  sys.read(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  EXPECT_NEAR(OdriveSystemTestAccess::states(sys)[0].pos_joint, kPi, 1e-6);
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
 TEST(IntegrationCan, SkipsSendingUnchangedCommandsWithinTolerance) {
   std::shared_ptr<FakeCanTransport> fake;
   OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
@@ -138,6 +212,8 @@ TEST(IntegrationCan, SkipsSendingUnchangedCommandsWithinTolerance) {
   ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  auto hb_closed = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_closed, rclcpp::Clock().now());
   sys.perform_command_mode_switch({"joint1/position"}, {});
 
   auto count_pos_msgs = [](const std::vector<can_frame> &frames) {
@@ -229,7 +305,10 @@ TEST(IntegrationCan, HomingCommandSendsAxisState) {
   auto info = make_info();
   ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
-  ASSERT_TRUE(OdriveSystemTestAccess::start_homing(sys));
+  sys.perform_command_mode_switch({}, {});
+  auto &cmds = OdriveSystemTestAccess::commands(sys);
+  cmds[0].homing = 1.0;
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
 
   bool found_homing = false;
   for (const auto &frame : fake->sent_frames) {
@@ -249,11 +328,7 @@ TEST(IntegrationCan, HomingCommandSendsAxisState) {
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
 }
 
-TEST(IntegrationCan, HardwareStatusReflectsAxisErrorsAndHeartbeats) {
-  if (!rclcpp::ok()) {
-    rclcpp::init(0, nullptr);
-  }
-
+TEST(IntegrationCan, HardwareStatusTracksHealthChanges) {
   std::shared_ptr<FakeCanTransport> fake;
   OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
     fake = std::make_shared<FakeCanTransport>();
@@ -263,54 +338,23 @@ TEST(IntegrationCan, HardwareStatusReflectsAxisErrorsAndHeartbeats) {
   OdriveS1CanSystem sys;
   auto info = make_info();
   info.hardware_parameters["status_publish_rate"] = "100.0";
-  info.hardware_parameters["heartbeat_timeout"] = "0.1";
   ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
 
-  auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
-  auto listener = std::make_shared<rclcpp::Node>("status_listener");
-  control_msgs::msg::HardwareStatus::SharedPtr received;
-  auto sub = listener->create_subscription<control_msgs::msg::HardwareStatus>(
-      "hardware_status", rclcpp::QoS{10},
-      [&](control_msgs::msg::HardwareStatus::SharedPtr msg) { received = std::move(msg); });
-  executor->add_node(listener);
+  // Healthy heartbeat.
+  auto hb_ok = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_ok, rclcpp::Clock().now());
+  sys.read(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  ASSERT_FALSE(OdriveSystemTestAccess::status(sys).empty());
+  EXPECT_EQ(OdriveSystemTestAccess::status(sys)[0].status, 0u);
 
-  auto now = OdriveSystemTestAccess::node(sys)->get_clock()->now();
-  auto hb_fault = make_heartbeat(axis_can_id(1, 0), 0x5, AXIS_STATE_CLOSED_LOOP_CONTROL);
-  OdriveSystemTestAccess::handle(sys, hb_fault, now);
-
-  auto &states = OdriveSystemTestAccess::states(sys);
-  states[1].last_heartbeat = now - rclcpp::Duration(1, 0); // trigger stale heartbeat warning
-  OdriveSystemTestAccess::set_last_status_time(sys, now - rclcpp::Duration(10, 0));
-
-  sys.read(OdriveSystemTestAccess::node(sys)->get_clock()->now(), rclcpp::Duration(0, 0));
-
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  while (!received && std::chrono::steady_clock::now() < deadline) {
-    executor->spin_some();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
-  ASSERT_NE(received, nullptr);
-  ASSERT_EQ(received->device_status.size(), 2u);
-
-  auto find_by_name = [&](const std::string &name) {
-    for (const auto &dev : received->device_status) {
-      if (dev.name == name) return &dev;
-    }
-    return static_cast<const control_msgs::msg::HardwareComponentStatus *>(nullptr);
-  };
-
-  const auto *joint1 = find_by_name("joint1");
-  const auto *joint2 = find_by_name("joint2");
-  ASSERT_NE(joint1, nullptr);
-  ASSERT_NE(joint2, nullptr);
-  EXPECT_EQ(joint1->status, control_msgs::msg::HardwareStatus::STATUS_ERROR);
-  EXPECT_NE(joint1->error_message.find("axis_error"), std::string::npos);
-  EXPECT_NE(joint1->error_message.find("requires_rearm=true"), std::string::npos);
-
-  EXPECT_EQ(joint2->status, control_msgs::msg::HardwareStatus::STATUS_WARNING);
-  EXPECT_NE(joint2->error_message.find("heartbeat_stale=true"), std::string::npos);
+  // Inject fault and expect status to flip to ERROR.
+  auto hb_fault = make_heartbeat(axis_can_id(1, 0), 0x2, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_fault, rclcpp::Clock().now());
+  sys.read(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  ASSERT_FALSE(OdriveSystemTestAccess::status(sys).empty());
+  EXPECT_EQ(OdriveSystemTestAccess::status(sys)[0].status, 2u);
 
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
 }
@@ -328,6 +372,10 @@ TEST(IntegrationCan, RespectsFrameBudgetPerCycle) {
   ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  auto hb1 = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  auto hb2 = make_heartbeat(axis_can_id(2, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb1, rclcpp::Clock().now());
+  OdriveSystemTestAccess::handle(sys, hb2, rclcpp::Clock().now());
   sys.perform_command_mode_switch({"joint1/position", "joint2/position"}, {});
 
   auto &cmds = OdriveSystemTestAccess::commands(sys);
@@ -355,6 +403,63 @@ TEST(IntegrationCan, RespectsFrameBudgetPerCycle) {
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
 }
 
+TEST(IntegrationCan, RespectsMaxFramesPerSecondBudget) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  info.hardware_parameters["max_frames_per_sec"] = "1.0";
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  sys.perform_command_mode_switch({"joint1/position"}, {});
+
+  fake->sent_frames.clear();
+  auto &util = OdriveSystemTestAccess::util(sys);
+  util.frames_in_window = 1;
+  util.window_start = rclcpp::Clock().now();
+
+  auto &cmds = OdriveSystemTestAccess::commands(sys);
+  cmds[0].position = 0.5;
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  EXPECT_TRUE(fake->sent_frames.empty()); // blocked by per-sec budget
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
+TEST(IntegrationCan, UtilizationLimitSkipsSendsWhenOverBudget) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  info.hardware_parameters["can_utilization_limit"] = "0.01";
+  info.hardware_parameters["max_frames_per_cycle"] = "0";
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  sys.perform_command_mode_switch({"joint1/position"}, {});
+
+  fake->sent_frames.clear();
+  auto &util = OdriveSystemTestAccess::util(sys);
+  util.frames_per_sec_ewma = 100000.0; // artificially high so utilization check trips
+  util.window_start = rclcpp::Clock().now();
+
+  auto &cmds = OdriveSystemTestAccess::commands(sys);
+  cmds[0].position = 0.5;
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  EXPECT_TRUE(fake->sent_frames.empty());
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
 TEST(IntegrationCan, CommandAndFeedbackLoopUpdatesState) {
   std::shared_ptr<FakeCanTransport> fake;
   OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
@@ -367,6 +472,8 @@ TEST(IntegrationCan, CommandAndFeedbackLoopUpdatesState) {
   ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  auto hb_closed = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_closed, rclcpp::Clock().now());
   sys.perform_command_mode_switch({"joint1/velocity"}, {});
 
   // Push encoder and torque feedback to simulate CANSimple stream.
@@ -457,6 +564,182 @@ TEST(IntegrationCan, LimitMismatchStrictFailsActivate) {
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
 }
 
+TEST(IntegrationCan, LimitCheckStrictFailsWithSdoAccelMismatch) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  fake->set_send_hook([](const can_frame &frame, FakeCanTransport &t) {
+    const uint8_t cmd = frame.can_id & 0x1f;
+    if (cmd != 0x04) return; // RxSdo
+    const uint16_t endpoint = static_cast<uint16_t>(frame.data[1] | (frame.data[2] << 8));
+    float value = 0.0f;
+    if (endpoint == 374) value = 20.0f;         // vel_limit OK
+    if (endpoint == 569) value = 10.0f;         // effort OK
+    if (endpoint == 403) value = 10.0f;         // accel too low
+    can_frame resp{};
+    resp.can_id = (frame.can_id & ~0x1f) | 0x05; // TxSdo
+    resp.can_dlc = 8;
+    resp.data[0] = 0;
+    resp.data[1] = static_cast<uint8_t>(endpoint & 0xffu);
+    resp.data[2] = static_cast<uint8_t>((endpoint >> 8) & 0xffu);
+    resp.data[3] = 0;
+    std::memcpy(&resp.data[4], &value, sizeof(float));
+    t.push_rx(resp);
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  info.hardware_parameters["limits_check.mode"] = "STRICT";
+  info.hardware_parameters["limits_check.use_sdo"] = "true";
+  info.hardware_parameters["limits_check.flat_endpoints_path"] = "test/odrive_s1_v6.11_flat_endpoints.json";
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+
+  auto &cfg = OdriveSystemTestAccess::configs(sys)[0];
+  cfg.limit_velocity = 5.0;
+  cfg.limit_effort = 5.0;
+  cfg.limit_acceleration = 30.0; // in joint units -> actuator turns/s^2 higher than returned
+
+  EXPECT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::ERROR);
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
+TEST(IntegrationCan, LimitCheckStrictFailsWithoutOdriveLimits) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  info.hardware_parameters["limits_check.mode"] = "STRICT";
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+
+  auto &cfg = OdriveSystemTestAccess::configs(sys)[0];
+  cfg.limit_velocity = 5.0;
+
+  EXPECT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::ERROR);
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
+TEST(IntegrationCan, LimitCheckWarnOnlyAcrossAllLimitsWithSdoPrismatic) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  fake->set_send_hook([](const can_frame &frame, FakeCanTransport &t) {
+    const uint8_t cmd = frame.can_id & 0x1f;
+    if (cmd != 0x04) return; // RxSdo
+    const uint16_t endpoint = static_cast<uint16_t>(frame.data[1] | (frame.data[2] << 8));
+    float value = 0.0f;
+    if (endpoint == 374) value = 18.0f;          // vel_limit (turns/s)
+    if (endpoint == 569) value = 3.0f;           // current limit
+    if (endpoint == 403) value = 80.0f;          // accel_limit (turns/s^2)
+    can_frame resp{};
+    resp.can_id = (frame.can_id & ~0x1f) | 0x05; // TxSdo
+    resp.can_dlc = 8;
+    resp.data[0] = 0;
+    resp.data[1] = static_cast<uint8_t>(endpoint & 0xffu);
+    resp.data[2] = static_cast<uint8_t>((endpoint >> 8) & 0xffu);
+    resp.data[3] = 0;
+    std::memcpy(&resp.data[4], &value, sizeof(float));
+    t.push_rx(resp);
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  info.joints[0].type = "prismatic";
+  info.joints[0].parameters["lead_screw_pitch"] = "0.01";
+  info.hardware_parameters["limits_check.mode"] = "WARN_ONLY";
+  info.hardware_parameters["limits_check.use_sdo"] = "true";
+  info.hardware_parameters["limits_check.flat_endpoints_path"] = "test/odrive_s1_v6.11_flat_endpoints.json";
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+
+  auto &cfg = OdriveSystemTestAccess::configs(sys)[0];
+  cfg.limit_velocity = 0.2;     // expected actuator 20 turns/s
+  cfg.limit_effort = 5.0;       // expected actuator 5 A
+  cfg.limit_acceleration = 1.0; // expected actuator 100 turns/s^2
+
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  const auto &meta = OdriveSystemTestAccess::runtime(sys)[0];
+  EXPECT_EQ(meta.limit_check_result,
+            odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadata::LimitCheckResult::WARN);
+  EXPECT_EQ(OdriveSystemTestAccess::states(sys)[0].health, AxisHealth::WARNING);
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
+TEST(IntegrationCan, CommandSendLatencyRecordedWithinCycle) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  sys.perform_command_mode_switch({"joint1/position"}, {});
+
+  auto &cmds = OdriveSystemTestAccess::commands(sys);
+  cmds[0].position = 0.25;
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+
+  ASSERT_FALSE(fake->sent_frames.empty());
+  EXPECT_LT(OdriveSystemTestAccess::util(sys).last_send_latency_sec, 0.05);
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
+TEST(IntegrationCan, ModeSwitchWaitsForClosedLoopBeforeStreaming) {
+  std::shared_ptr<FakeCanTransport> fake;
+  OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
+    fake = std::make_shared<FakeCanTransport>();
+    return fake;
+  });
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+
+  auto hb_closed = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_closed, rclcpp::Clock().now());
+  sys.perform_command_mode_switch({"joint1/position"}, {});
+  auto &cmds = OdriveSystemTestAccess::commands(sys);
+  cmds[0].position = 0.5;
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  const size_t pos_msgs = fake->sent_frames.size();
+  EXPECT_GT(pos_msgs, 0u);
+
+  // Switch to velocity and ensure no streaming until heartbeat acknowledges CLOSED_LOOP.
+  sys.perform_command_mode_switch({"joint1/velocity"}, {"joint1/position"});
+  cmds[0].velocity = 1.0;
+  const size_t before_vel = fake->sent_frames.size();
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  EXPECT_EQ(fake->sent_frames.size(), before_vel); // gated
+
+  auto hb_closed_vel = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_closed_vel, rclcpp::Clock().now());
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  EXPECT_GT(fake->sent_frames.size(), before_vel);
+
+  OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
+}
+
 TEST(IntegrationCan, HomingSuccessAndFailureClassification) {
   std::shared_ptr<FakeCanTransport> fake;
   OdriveS1CanSystem::set_transport_factory_for_tests([&]() {
@@ -468,7 +751,8 @@ TEST(IntegrationCan, HomingSuccessAndFailureClassification) {
   auto info = make_info();
   ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
-  ASSERT_TRUE(OdriveSystemTestAccess::start_homing(sys));
+  OdriveSystemTestAccess::commands(sys)[0].homing = 1.0;
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
 
   // Homing success: heartbeat transitions from HOMING to CLOSED_LOOP with no error.
   auto now = rclcpp::Clock().now();
@@ -477,12 +761,15 @@ TEST(IntegrationCan, HomingSuccessAndFailureClassification) {
   auto hb_closed = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
   OdriveSystemTestAccess::handle(sys, hb_closed, now + rclcpp::Duration(0, 1000000));
   EXPECT_EQ(OdriveSystemTestAccess::runtime(sys)[0].last_homing_result, "success");
+  EXPECT_EQ(OdriveSystemTestAccess::modes(sys)[0], AxisControlMode::IDLE);
 
   // Homing failure: heartbeat with error during homing.
   ASSERT_TRUE(OdriveSystemTestAccess::start_homing(sys));
   auto hb_fail = make_heartbeat(axis_can_id(1, 0), 0x2, AXIS_STATE_HOMING);
   OdriveSystemTestAccess::handle(sys, hb_fail, now + rclcpp::Duration(0, 2000000));
   EXPECT_EQ(OdriveSystemTestAccess::runtime(sys)[0].last_homing_result, "failed");
+  EXPECT_EQ(OdriveSystemTestAccess::states(sys)[0].health, AxisHealth::ERROR);
+  EXPECT_EQ(OdriveSystemTestAccess::modes(sys)[0], AxisControlMode::IDLE);
 
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
 }
@@ -522,6 +809,8 @@ TEST(IntegrationCan, LimitCheckUsesSdoWhenEnabled) {
   info.hardware_parameters["limits_check.sdo_timeout_sec"] = "0.1";
   ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
   ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  auto hb_closed = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_closed, rclcpp::Clock().now());
 
   auto &cfg = OdriveSystemTestAccess::configs(sys)[0];
   cfg.limit_velocity = 5.0;

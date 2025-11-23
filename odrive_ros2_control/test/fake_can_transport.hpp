@@ -4,6 +4,8 @@
 #include <functional>
 #include <vector>
 
+#include <linux/can.h>
+
 #include "odrive_ros2_control/odrive_system.hpp"
 
 class FakeCanTransport final : public odrive_ros2_control::CanTransport {

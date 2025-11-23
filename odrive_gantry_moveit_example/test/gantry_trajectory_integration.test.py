@@ -18,7 +18,9 @@ from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
 from rclpy.action import ActionClient
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node as RclpyNode
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -42,10 +44,12 @@ def generate_test_description():
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             xacro_path,
+            " pkg_share:=",
+            pkg_share,
             " use_simulated_odrive:=true",
         ]
     )
-    robot_description = {"robot_description": robot_description_content}
+    robot_description = {"robot_description": ParameterValue(robot_description_content, value_type=str)}
 
     control_node = Node(
         package="controller_manager",
@@ -85,8 +89,9 @@ class TrajectoryHarness:
     This class wraps the ActionClient for FollowJointTrajectory and the subscription
     to /joint_states to make testing easier.
     """
-    def __init__(self, node: RclpyNode):
+    def __init__(self, node: RclpyNode, executor: SingleThreadedExecutor):
         self._node = node
+        self._executor = executor
         self._latest_state = None
         self._sub = node.create_subscription(JointState, "/joint_states", self._state_cb, 10)
         self._client = ActionClient(node, FollowJointTrajectory, "/gantry_controller/follow_joint_trajectory")
@@ -97,7 +102,7 @@ class TrajectoryHarness:
     def wait_for_ready(self, timeout_sec=15.0):
         end = time.time() + timeout_sec
         while time.time() < end and not self._client.wait_for_server(timeout_sec=0.5):
-            rclpy.spin_once(self._node, timeout_sec=0.1)
+            self._executor.spin_once(timeout_sec=0.1)
         return self._client.server_is_ready()
 
     def send_and_wait(self):
@@ -116,18 +121,18 @@ class TrajectoryHarness:
             ),
         ]
         send_future = self._client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self._node, send_future, timeout_sec=10.0)
+        self._executor.spin_until_future_complete(send_future, timeout_sec=10.0)
         goal_handle = send_future.result()
         assert goal_handle is not None and goal_handle.accepted, "Goal rejected by controller"
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self._node, result_future, timeout_sec=15.0)
+        self._executor.spin_until_future_complete(result_future, timeout_sec=15.0)
         assert result_future.result().status == 0, f"Goal finished with status {result_future.result().status}"
 
     def assert_final_pose(self, tolerance=0.02):
         end = time.time() + 3.0
         while time.time() < end:
-            rclpy.spin_once(self._node, timeout_sec=0.1)
+            self._executor.spin_once(timeout_sec=0.1)
         assert self._latest_state is not None, "No joint_states received"
         idx = {name: i for i, name in enumerate(self._latest_state.name)}
         targets = {"x_joint": -0.1, "y_joint": -0.15, "yaw_joint": -0.6}
@@ -150,9 +155,15 @@ def test_gantry_executes_trajectory(launch_service, control_node, proc_output):
     rclpy.init()
     try:
         node = rclpy.create_node("gantry_traj_tester")
-        harness = TrajectoryHarness(node)
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        harness = TrajectoryHarness(node, executor)
         assert harness.wait_for_ready(), "Action server not ready"
         harness.send_and_wait()
         harness.assert_final_pose()
     finally:
+        try:
+            executor.remove_node(node)
+        except Exception:
+            pass
         rclpy.shutdown()

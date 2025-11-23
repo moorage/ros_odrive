@@ -1,7 +1,6 @@
 #pragma once
 
 #include <functional>
-#include <linux/can.h>
 #include <memory>
 #include <optional>
 #include <string>
@@ -9,14 +8,14 @@
 #include <vector>
 
 #include "can_simple_messages.hpp"
-#include "control_msgs/msg/hardware_status.hpp"
-#include "diagnostic_updater/diagnostic_updater.hpp"
-#include "diagnostic_updater/publisher.hpp"
+#include "odrive_ros2_control/hardware_status_compat.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/state.hpp"
-#include "std_srvs/srv/trigger.hpp"
+#include "transmission_interface/simple_transmission.hpp"
+
+struct can_frame; // forward declaration to keep header portable
 
 namespace odrive_ros2_control {
 
@@ -29,6 +28,11 @@ enum class AxisHealth { OK, WARNING, ERROR };
  * @brief Represents the control mode of an axis.
  */
 enum class AxisControlMode { IDLE, POSITION, VELOCITY, EFFORT, HOMING };
+
+/**
+ * @brief Represents the power state used for diagnostics exposure.
+ */
+enum class AxisPowerState { UNKNOWN = 0, ON = 1, OFF = 2, ERROR = 3 };
 
 /**
  * @brief Configuration for a single axis.
@@ -69,6 +73,12 @@ struct AxisState {
   uint32_t disarm_reason = 0;
   uint8_t axis_state = 0;
   bool heartbeat_stale = false;
+  double health_numeric = 0.0;
+  double power_state_numeric = 0.0;
+  double axis_state_report = 0.0;
+  double fault_code = 0.0;
+  double heartbeat_age = 0.0;
+  double homing_status = 0.0; // 0 unknown,1 requested,2 success,3 failed
   rclcpp::Time last_heartbeat;
 };
 
@@ -134,6 +144,7 @@ public:
   const std::vector<AxisState> &debug_axis_states() const { return axis_states_; }
   const std::vector<AxisConfig> &debug_axis_configs() const { return axis_configs_; }
   const std::vector<AxisControlMode> &debug_modes() const { return command_modes_; }
+  const std::vector<HardwareStatusMsg> &debug_hardware_status() const { return hardware_status_cache_; }
 
   CallbackReturn on_init(const hardware_interface::HardwareInfo &info) override;
   CallbackReturn on_configure(const rclcpp_lifecycle::State &previous_state) override;
@@ -164,6 +175,7 @@ private:
     double position = 0.0;
     double velocity = 0.0;
     double effort = 0.0;
+    double homing = 0.0; // >0 triggers homing request
   };
 
   struct NodeStatus {
@@ -177,6 +189,8 @@ private:
     bool fault_idle_on_error = true;
     bool require_rearm_after_fault = true;
     bool limits_check_use_sdo = false;
+    bool strict_bitrate = true;
+    bool skip_can_validation = false;
     std::string flat_endpoints_path;
     double sdo_timeout_sec = 0.5;
     LimitCheckConfig limit_check_config;
@@ -190,6 +204,7 @@ private:
     double last_cmd_vel = 0.0;
     double last_cmd_effort = 0.0;
     bool sent_closed_loop = false;
+    bool homing_requested = false;
     std::optional<double> odrive_velocity_limit;
     std::optional<double> odrive_effort_limit;
     std::optional<double> odrive_accel_limit;
@@ -199,13 +214,31 @@ private:
     uint32_t disarm_reason = 0;
     uint8_t last_axis_state = 0;
     std::string last_homing_result = "unknown";
+    std::string fault_detail;
     enum class LimitCheckResult { UNKNOWN, OK, WARN, ERROR, SKIPPED_NO_DATA };
     LimitCheckResult limit_check_result = LimitCheckResult::UNKNOWN;
     std::string limit_check_detail;
+    bool awaiting_closed_loop = false;
+    bool awaiting_idle = false;
+    bool pending_idle_request = false;
+    std::optional<uint8_t> pending_control_mode;
+  };
+
+  struct TransmissionData {
+    std::unique_ptr<transmission_interface::SimpleTransmission> transmission;
+    transmission_interface::ActuatorData actuator_data;
+    transmission_interface::JointData joint_data;
+    double actuator_pos = 0.0;
+    double actuator_vel = 0.0;
+    double actuator_effort = 0.0;
+    double joint_pos = 0.0;
+    double joint_vel = 0.0;
+    double joint_effort = 0.0;
+    bool valid() const { return static_cast<bool>(transmission); }
   };
 
   AxisControlMode string_to_mode(const std::string &mode) const;
-  std::string mode_to_string(AxisControlMode mode) const;
+  const char *mode_to_string(AxisControlMode mode) const;
 
   bool validate_parameters();
   void load_flat_endpoints();
@@ -225,19 +258,22 @@ private:
   void process_encoder_estimate(size_t idx, const Get_Encoder_Estimates_msg_t &msg);
   void process_torque_feedback(size_t idx, const Get_Torques_msg_t &msg);
   void process_sdo_response(const can_frame &frame, const rclcpp::Time &stamp);
-  void update_health(size_t idx, bool heartbeat_refresh);
+  void update_health(size_t idx, const rclcpp::Time &now, bool heartbeat_refresh);
   void latch_fault(size_t idx, uint32_t axis_error);
   bool clear_errors_and_rearm(size_t idx);
   std::optional<double> read_endpoint_via_sdo(int node_id, const EndpointInfo &ep);
   double decode_sdo_value(const EndpointInfo &ep, uint32_t raw) const;
 
   // Unit conversion helpers between actuator turns/torque and joint units.
-  double actuator_to_joint_pos(const AxisConfig &cfg, double turns) const;
-  double joint_to_actuator_pos(const AxisConfig &cfg, double joint_pos) const;
-  double actuator_vel_to_joint(const AxisConfig &cfg, double turns_per_sec) const;
-  double joint_vel_to_actuator(const AxisConfig &cfg, double joint_vel) const;
-  double actuator_effort_to_joint(const AxisConfig &cfg, double torque) const;
-  double joint_effort_to_actuator(const AxisConfig &cfg, double effort) const;
+  double actuator_to_joint_pos(size_t idx, double turns);
+  double joint_to_actuator_pos(size_t idx, double joint_pos);
+  double actuator_vel_to_joint(size_t idx, double turns_per_sec);
+  double joint_vel_to_actuator(size_t idx, double joint_vel);
+  double actuator_effort_to_joint(size_t idx, double torque);
+  double joint_effort_to_actuator(size_t idx, double effort);
+  AxisPowerState derive_power_state(const AxisState &state) const;
+  int health_to_int(AxisHealth health) const;
+  int power_state_to_int(AxisPowerState state) const;
 
   bool send_axis_state(size_t idx, uint32_t requested_state);
   bool send_control_mode(size_t idx, uint8_t control_mode, bool require_closed_loop);
@@ -245,18 +281,21 @@ private:
   bool send_velocity_command(size_t idx, double turns_per_sec, double torque_ff);
   bool send_torque_command(size_t idx, double torque);
   bool send_clear_errors(size_t idx);
-  bool send_frame(const can_frame &frame, bool count_budget);
+  bool send_frame(const can_frame &frame, bool count_budget, const rclcpp::Time &now);
   bool can_send_frame(const rclcpp::Time &now);
+  void update_fault_detail(size_t idx);
+  rclcpp::Time now_for_io() const;
 
   // Compare URDF limits with ODrive-reported limits based on configured policy.
   bool run_limit_check(size_t idx);
   void publish_status_if_due(const rclcpp::Time &stamp);
+  void populate_status_messages();
   uint32_t axis_can_id(size_t idx) const;
   bool start_homing();
 
   static CanTransportFactory default_transport_factory();
 
-  static CanTransportFactory transport_factory_override_;
+  static thread_local CanTransportFactory transport_factory_override_;
 
   NodeStatus node_status_;
   std::vector<AxisConfig> axis_configs_;
@@ -265,6 +304,7 @@ private:
   std::vector<AxisControlMode> command_modes_;
   std::vector<AxisRuntimeMetadata> runtime_metadata_;
   std::vector<uint32_t> axis_can_ids_;
+  std::vector<std::optional<TransmissionData>> transmissions_;
   std::unordered_map<uint32_t, size_t> can_id_lookup_;
   std::unordered_map<int, size_t> node_to_primary_axis_;
   std::string flat_endpoints_json_;
@@ -280,16 +320,13 @@ private:
 
   std::shared_ptr<CanTransport> transport_;
   CanTransportFactory transport_factory_;
-  rclcpp::Node::SharedPtr node_;
-  rclcpp::Publisher<control_msgs::msg::HardwareStatus>::SharedPtr hw_status_pub_;
-  std::unique_ptr<diagnostic_updater::Updater> diag_updater_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_errors_srv_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_errors_and_rearm_srv_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr home_srv_;
+  rclcpp::Clock steady_clock_{RCL_STEADY_TIME};
+  rclcpp::Time last_control_time_;
 
   rclcpp::Time last_status_publish_time_;
   bool active_ = false;
   bool configured_ = false;
+  std::vector<HardwareStatusMsg> hardware_status_cache_;
 
   struct UtilizationMetrics {
     size_t frames_this_cycle = 0;
@@ -301,6 +338,7 @@ private:
     rclcpp::Time last_write_start;
     double frames_per_sec_ewma = 0.0;
     double avg_write_duration_sec = 0.0;
+    double last_send_latency_sec = 0.0;
     bool budget_exceeded_last_cycle = false;
   } util_metrics_;
 };

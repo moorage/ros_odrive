@@ -53,7 +53,7 @@ Engineering Requirements (with mandatory tests)
 
 **Requirements**
 
-2.1 The hardware plugin MUST represent the entire robot as one SystemInterface instance.2.2 The plugin MUST support an arbitrary mapping of URDF joints to (node\_id, axis\_index) pairs.2.3 Configuration MUST allow multiple ODrives on one CAN bus and up to 2 axes per ODrive.
+2.1 The hardware plugin MUST represent the entire robot as one SystemInterface instance.2.2 The plugin MUST support an arbitrary mapping of URDF joints to (node\_id, axis\_index) pairs.2.3 Configuration MUST allow multiple ODrives on one CAN bus and up to 2 axes per ODrive.2.4 The hardware plugin MUST remain a pure ros2\_control SystemInterface (no rclcpp nodes/publishers/subscribers/services); ROS communications are handled by controllers or companion nodes.
 
 **Testing**
 
@@ -115,7 +115,7 @@ Engineering Requirements (with mandatory tests)
 
 #### 4.1 Transport
 
-4.1.1 System MUST support a configurable CAN interface name (e.g. can0).4.1.2 CAN bitrate MUST be configurable and validated at startup.4.1.3 Each ODrive board MUST be addressed by a unique CAN node ID; axes MUST be correctly distinguished.
+4.1.1 System MUST support a configurable CAN interface name (e.g. can0).4.1.2 The plugin MUST validate that the configured CAN bitrate matches expectations but MUST NOT bring up or change the interface; OS/launch scripts are responsible for interface bring-up (ip link up/bitrate).4.1.3 Each ODrive board MUST be addressed by a unique CAN node ID; axes MUST be correctly distinguished.
 
 #### 4.2 Protocol
 
@@ -245,14 +245,14 @@ Engineering Requirements (with mandatory tests)
 
 *   HardwareStatus (per-joint device state).
     
-*   /diagnostics output.
+*   /diagnostics output (via diagnostics controller/node).
     
 
-7.5 The system MUST expose an explicit recovery path:
+7.5 Recovery MUST be coordinated by a dedicated controller or companion node (not hosted inside the hardware plugin):
 
-*   Service/API to clear ODrive errors.
+*   The SystemInterface exposes faulted/healthy state so controllers can halt trajectories for faulted joints.
     
-*   Re-arm axis and re-enter CLOSED\_LOOP only on explicit request.
+*   Clearing ODrive errors and re-arming axes is triggered via controller-driven commands/mode switches; the plugin MUST NOT host ROS services/actions.
     
 
 **Testing**
@@ -278,7 +278,7 @@ Engineering Requirements (with mandatory tests)
 
 ### 8\. Homing and Calibration
 
-8.1 The system MUST support ODrive-side homing (endstops/index) per axis, triggered via ROS (service/action/command).8.2 On homing success:
+8.1 The system MUST support ODrive-side homing (endstops/index) per axis, triggered by a dedicated homing controller or external node; the hardware plugin MUST NOT host ROS services/actions.8.2 On homing success:
 
 *   Joint zero MUST be aligned with the intended URDF zero, considering transmissions and offsets.
     
@@ -307,7 +307,7 @@ Engineering Requirements (with mandatory tests)
 
 ### 9\. Diagnostics and HardwareStatus
 
-9.1 The plugin MUST implement the HardwareStatus extension hooks so that the framework can publish control\_msgs/msg/HardwareStatus at a configurable rate.9.2 For each joint, HardwareStatus MUST include:
+9.1 The plugin SHOULD populate the optional HardwareStatus extension (when supported by the target ros2\_control version) so that controller\_manager can publish control\_msgs/msg/HardwareStatus; publication rate is configured in controller\_manager, not per-hardware.9.2 For each joint, HardwareStatus MUST include:
 
 *   Current health status (OK/WARNING/ERROR).
     
@@ -318,12 +318,7 @@ Engineering Requirements (with mandatory tests)
 *   State details with key/value info (errors, last heartbeat age, etc.).
     
 
-9.3 The plugin MUST also publish diagnostics on /diagnostics using diagnostic\_updater, summarizing:
-
-*   Global health.
-    
-*   Per-axis key metrics and error states.
-    
+9.3 /diagnostics publication MUST be provided by a separate diagnostics controller or node consuming HardwareStatus/state interfaces; the hardware plugin itself MUST remain free of ROS publishers/subscribers.
 
 **Testing**
 
@@ -331,29 +326,31 @@ Engineering Requirements (with mandatory tests)
     
     *   HardwareStatus population logic from internal AxisState + fault state.
         
-    *   Diagnostic updater callbacks.
+    *   Any helper structures that expose diagnostic key/values to the diagnostics controller/node.
         
 *   Integration:
     
-    *   Bring up the system, induce known conditions (healthy, warning, error) and verify messages on /hardware\_status and /diagnostics are correct.
+    *   Bring up the system with the diagnostics controller/node, induce known conditions (healthy, warning, error) and verify messages on /hardware\_status and /diagnostics are correct.
         
 
 ### 10\. Configuration and Parameters
 
-10.1 System-level parameters MUST include:
+10.1 Hardware configuration is provided via ros2\_control URDF + hardware YAML (through controller\_manager); the hardware plugin MUST NOT declare runtime ROS parameters of its own.
+
+10.2 System-level configuration entries MUST include:
 
 *   can\_interface (string)
-    
-*   status\_publish\_rate (double Hz)
     
 *   Default control mode
     
 *   Timeouts (CAN RX, heartbeat)
     
-*   Logging verbosity levels.
+*   Optional limits/check tolerances
+    
+*   Logging verbosity is controlled by standard ROS 2 logging configuration (not custom parameters on the plugin).
     
 
-10.2 Per-joint parameters MUST include:
+10.3 Per-joint configuration entries MUST include:
 
 *   odrive\_node\_id
     
@@ -362,7 +359,7 @@ Engineering Requirements (with mandatory tests)
 *   Optional gear\_ratio, lead\_screw\_pitch, torque\_constant when not using transmissions.
     
 
-10.3 All parameters MUST be validated at configuration time, and invalid configs MUST fail configuration with clear error messages.
+10.4 All configuration MUST be validated at configure() time, and invalid configs MUST fail configuration with clear error messages.
 
 **Testing**
 

@@ -19,6 +19,7 @@ from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -51,13 +52,15 @@ def generate_launch_description():
             PathJoinSubstitution(
                 [FindPackageShare("odrive_gantry_moveit_example"), "description", "urdf", "gantry.urdf.xacro"]
             ),
+            " pkg_share:=",
+            FindPackageShare("odrive_gantry_moveit_example"),
             " use_simulated_odrive:=",
             use_sim_hw,
             " can_interface:=",
             can_iface,
         ]
     )
-    robot_description = {"robot_description": robot_description_content}
+    robot_description = {"robot_description": ParameterValue(robot_description_content, value_type=str)}
 
     share_dir = get_package_share_directory("odrive_gantry_moveit_example")
 
@@ -92,13 +95,6 @@ def generate_launch_description():
         parameters=[robot_description],
         output="both",
     )
-    move_group = Node(
-        package="moveit_ros_move_group",
-        executable="move_group",
-        output="screen",
-        parameters=[robot_description, moveit_params],
-    )
-
     jsb = Node(
         package="controller_manager",
         executable="spawner",
@@ -113,5 +109,19 @@ def generate_launch_description():
         event_handler=OnProcessExit(target_action=jsb, on_exit=[traj_ctrl])
     )
 
-    nodes = [control_node, robot_state_pub_node, move_group, jsb, delayed_traj]
+    move_group = RegisterEventHandler(
+        OnProcessExit(
+            target_action=traj_ctrl,
+            on_exit=[
+                Node(
+                    package="moveit_ros_move_group",
+                    executable="move_group",
+                    output="screen",
+                    parameters=[robot_description, moveit_params],
+                )
+            ],
+        )
+    )
+
+    nodes = [control_node, robot_state_pub_node, jsb, delayed_traj, move_group]
     return LaunchDescription(declared_arguments + nodes)

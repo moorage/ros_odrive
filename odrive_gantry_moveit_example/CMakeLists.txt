@@ -17,11 +17,7 @@ find_package(controller_manager REQUIRED)
 find_package(joint_trajectory_controller REQUIRED)
 find_package(joint_state_broadcaster REQUIRED)
 find_package(odrive_ros2_control REQUIRED)
-
-include_directories(
-  include
-  ../odrive_base/include
-)
+find_package(odrive_base REQUIRED)
 
 add_library(sim_odrive_hw SHARED
   src/simulated_odrive_hardware.cpp
@@ -32,8 +28,8 @@ ament_target_dependencies(sim_odrive_hw
   hardware_interface
   pluginlib
   odrive_ros2_control
+  odrive_base
 )
-target_link_libraries(sim_odrive_hw odrive_ros2_control_plugin)
 target_compile_features(sim_odrive_hw PUBLIC cxx_std_20)
 
 pluginlib_export_plugin_description_file(hardware_interface sim_odrive_hardware.xml)

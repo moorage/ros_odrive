@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(ament_cmake_auto REQUIRED)
 find_package(ament_cmake_gtest REQUIRED)
+find_package(control_msgs QUIET)
 ament_auto_find_build_dependencies()
 
 ament_export_dependencies(rosidl_default_runtime)
@@ -29,11 +30,11 @@ ament_target_dependencies(odrive_ros2_control_plugin
   rclcpp_lifecycle
   hardware_interface
   pluginlib
-  diagnostic_updater
-  control_msgs
-  std_srvs
   transmission_interface
 )
+if(control_msgs_FOUND)
+  ament_target_dependencies(odrive_ros2_control_plugin control_msgs)
+endif()
 
 pluginlib_export_plugin_description_file(hardware_interface odrive_hardware_interface.xml)
 
@@ -56,10 +57,10 @@ ament_target_dependencies(unit_logic_test
   rclcpp
   rclcpp_lifecycle
   hardware_interface
-  control_msgs
-  std_srvs
-  diagnostic_updater
 )
+if(control_msgs_FOUND)
+  ament_target_dependencies(unit_logic_test control_msgs)
+endif()
 
 ament_add_gtest(integration_can_test
   test/integration_can_test.cpp
@@ -69,9 +70,9 @@ ament_target_dependencies(integration_can_test
   rclcpp
   rclcpp_lifecycle
   hardware_interface
-  control_msgs
-  std_srvs
-  diagnostic_updater
 )
+if(control_msgs_FOUND)
+  ament_target_dependencies(integration_can_test control_msgs)
+endif()
 
 ament_package()

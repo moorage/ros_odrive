@@ -75,18 +75,23 @@ void SocketCanIntf::deinit() {
 }
 
 bool SocketCanIntf::send_can_frame(const can_frame& frame) {
+    // Socket opened non-blocking; if TX buffer is full, return false instead of blocking.
     ssize_t nbytes = write(socket_id_, &frame, sizeof(frame));
     if (nbytes == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return false;
+        }
         std::cerr << "Failed to send CAN frame" << std::endl;
         return false;
     }
-
-    return true;
+    return nbytes == static_cast<ssize_t>(sizeof(frame));
 }
 
 void SocketCanIntf::on_socket_event(uint32_t mask) {
     if (mask & EPOLLIN) {
-        while (read_nonblocking() && !broken_);
+        // Drain RX with an upper bound to keep callbacks bounded in time.
+        size_t budget = 64;
+        while (budget-- > 0 && read_nonblocking() && !broken_);
     }
     if (mask & EPOLLERR) {
         std::cerr << "interface disappeared" << std::endl;
