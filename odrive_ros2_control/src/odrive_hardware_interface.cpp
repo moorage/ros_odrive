@@ -448,6 +448,18 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   }
 
   hardware_status_cache_.assign(axis_configs_.size(), HardwareStatusMsg{});
+  if constexpr (requires { typename HardwareStatusMsg::KeyValue{}; }) {
+    constexpr size_t kValueCount = 5;
+    for (size_t i = 0; i < hardware_status_cache_.size(); ++i) {
+      auto &msg = hardware_status_cache_[i];
+      msg.values.resize(kValueCount);
+      msg.values[0].key = "axis_state";
+      msg.values[1].key = "fault_code";
+      msg.values[2].key = "health_detail";
+      msg.values[3].key = "heartbeat_age";
+      msg.values[4].key = "homing_status";
+    }
+  }
 
   if (!validate_parameters()) {
     return CallbackReturn::ERROR;
@@ -641,7 +653,7 @@ CallbackReturn OdriveS1CanSystem::on_activate(const rclcpp_lifecycle::State &) {
     return CallbackReturn::ERROR;
   }
   util_metrics_.window_start = rclcpp::Time(0, 0, steady_clock_.get_clock_type());
-  last_control_time_ = steady_clock_.now();
+  last_control_time_ = rclcpp::Time(0, 0, steady_clock_.get_clock_type());
   active_ = true;
   for (size_t i = 0; i < command_modes_.size(); ++i) {
     runtime_metadata_[i].sent_closed_loop = false;
@@ -668,40 +680,70 @@ CallbackReturn OdriveS1CanSystem::on_deactivate(const rclcpp_lifecycle::State &)
 
 std::vector<hardware_interface::StateInterface> OdriveS1CanSystem::export_state_interfaces() {
   std::vector<hardware_interface::StateInterface> state_interfaces;
+  state_interfaces.reserve(info_.joints.size() * 3); // heuristic
+
+  auto add_iface = [&](size_t idx, const std::string &name, double *ptr) {
+    state_interfaces.emplace_back(axis_configs_[idx].joint_name, name, ptr);
+  };
+
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, hardware_interface::HW_IF_POSITION, &axis_states_[i].pos_joint);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, hardware_interface::HW_IF_VELOCITY, &axis_states_[i].vel_joint);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, hardware_interface::HW_IF_EFFORT, &axis_states_[i].effort_joint);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, "health", &axis_states_[i].health_numeric);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, "axis_state", &axis_states_[i].axis_state_report);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, "power_state", &axis_states_[i].power_state_numeric);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, "fault_code", &axis_states_[i].fault_code);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, "heartbeat_age", &axis_states_[i].heartbeat_age);
-    state_interfaces.emplace_back(
-        axis_configs_[i].joint_name, "homing_status", &axis_states_[i].homing_status);
+    for (const auto &iface : info_.joints[i].state_interfaces) {
+      const auto &name = iface.name;
+      if (name == hardware_interface::HW_IF_POSITION) {
+        add_iface(i, name, &axis_states_[i].pos_joint);
+      } else if (name == hardware_interface::HW_IF_VELOCITY) {
+        add_iface(i, name, &axis_states_[i].vel_joint);
+      } else if (name == hardware_interface::HW_IF_EFFORT) {
+        add_iface(i, name, &axis_states_[i].effort_joint);
+      } else if (name == "health") {
+        add_iface(i, name, &axis_states_[i].health_numeric);
+      } else if (name == "axis_state") {
+        add_iface(i, name, &axis_states_[i].axis_state_report);
+      } else if (name == "power_state") {
+        add_iface(i, name, &axis_states_[i].power_state_numeric);
+      } else if (name == "fault_code") {
+        add_iface(i, name, &axis_states_[i].fault_code);
+      } else if (name == "heartbeat_age") {
+        add_iface(i, name, &axis_states_[i].heartbeat_age);
+      } else if (name == "homing_status") {
+        add_iface(i, name, &axis_states_[i].homing_status);
+      } else {
+        RCLCPP_WARN(
+            rclcpp::get_logger("OdriveS1CanSystem"),
+            "Ignoring unsupported state interface '%s' for joint %s",
+            name.c_str(), axis_configs_[i].joint_name.c_str());
+      }
+    }
   }
   return state_interfaces;
 }
 
 std::vector<hardware_interface::CommandInterface> OdriveS1CanSystem::export_command_interfaces() {
   std::vector<hardware_interface::CommandInterface> cmd_interfaces;
+  cmd_interfaces.reserve(info_.joints.size() * 2); // heuristic
+
+  auto add_iface = [&](size_t idx, const std::string &name, double *ptr) {
+    cmd_interfaces.emplace_back(axis_configs_[idx].joint_name, name, ptr);
+  };
+
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
-    cmd_interfaces.emplace_back(
-        axis_configs_[i].joint_name, hardware_interface::HW_IF_POSITION, &axis_commands_[i].position);
-    cmd_interfaces.emplace_back(
-        axis_configs_[i].joint_name, hardware_interface::HW_IF_VELOCITY, &axis_commands_[i].velocity);
-    cmd_interfaces.emplace_back(
-        axis_configs_[i].joint_name, hardware_interface::HW_IF_EFFORT, &axis_commands_[i].effort);
-    cmd_interfaces.emplace_back(
-        axis_configs_[i].joint_name, "homing", &axis_commands_[i].homing);
+    for (const auto &iface : info_.joints[i].command_interfaces) {
+      const auto &name = iface.name;
+      if (name == hardware_interface::HW_IF_POSITION) {
+        add_iface(i, name, &axis_commands_[i].position);
+      } else if (name == hardware_interface::HW_IF_VELOCITY) {
+        add_iface(i, name, &axis_commands_[i].velocity);
+      } else if (name == hardware_interface::HW_IF_EFFORT) {
+        add_iface(i, name, &axis_commands_[i].effort);
+      } else if (name == "homing") {
+        add_iface(i, name, &axis_commands_[i].homing);
+      } else {
+        RCLCPP_WARN(
+            rclcpp::get_logger("OdriveS1CanSystem"),
+            "Ignoring unsupported command interface '%s' for joint %s",
+            name.c_str(), axis_configs_[i].joint_name.c_str());
+      }
+    }
   }
   return cmd_interfaces;
 }
@@ -859,8 +901,11 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
 return_type OdriveS1CanSystem::read(const rclcpp::Time &stamp, const rclcpp::Duration &) {
   if (!transport_) return return_type::ERROR;
   transport_->poll();
-  const auto steady_now = steady_clock_.now();
-  last_control_time_ = steady_now;
+  rclcpp::Time control_now = stamp;
+  if (control_now.nanoseconds() == 0) {
+    control_now = steady_clock_.now();
+  }
+  last_control_time_ = control_now;
 
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
     // Convert actuator feedback (turns, turns/s, torque) to joint units (rad, rad/s, Nm).
@@ -869,10 +914,10 @@ return_type OdriveS1CanSystem::read(const rclcpp::Time &stamp, const rclcpp::Dur
     axis_states_[i].effort_joint = actuator_effort_to_joint(i, axis_states_[i].torque_actuator);
     
     // Update axis health status based on errors and heartbeat freshness.
-    update_health(i, steady_now, false);
+    update_health(i, control_now, false);
   }
 
-  publish_status_if_due(stamp);
+  publish_status_if_due(control_now);
   return return_type::OK;
 }
 
@@ -882,8 +927,12 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
 
   util_metrics_.frames_this_cycle = 0;
   util_metrics_.budget_exceeded_last_cycle = false;
-  last_control_time_ = steady_clock_.now();
-  util_metrics_.last_write_start = last_control_time_;
+  rclcpp::Time control_now = stamp;
+  if (control_now.nanoseconds() == 0) {
+    control_now = steady_clock_.now();
+  }
+  last_control_time_ = control_now;
+  util_metrics_.last_write_start = control_now;
   bool ok = true;
 
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
@@ -1687,7 +1736,18 @@ uint32_t OdriveS1CanSystem::axis_can_id(size_t idx) const {
 
 void OdriveS1CanSystem::populate_status_messages() {
   if (hardware_status_cache_.size() != axis_states_.size()) {
-    hardware_status_cache_.resize(axis_states_.size());
+    hardware_status_cache_.assign(axis_states_.size(), HardwareStatusMsg{});
+    if constexpr (requires { typename HardwareStatusMsg::KeyValue{}; }) {
+      constexpr size_t kValueCount = 5;
+      for (auto &msg : hardware_status_cache_) {
+        msg.values.resize(kValueCount);
+        msg.values[0].key = "axis_state";
+        msg.values[1].key = "fault_code";
+        msg.values[2].key = "health_detail";
+        msg.values[3].key = "heartbeat_age";
+        msg.values[4].key = "homing_status";
+      }
+    }
   }
   for (size_t i = 0; i < axis_states_.size(); ++i) {
     auto &msg = hardware_status_cache_[i];
@@ -1700,13 +1760,7 @@ void OdriveS1CanSystem::populate_status_messages() {
     msg_text.append(mode_to_string(command_modes_[i]));
     set_message_field(msg, msg_text);
 
-    msg.values.clear();
     if constexpr (requires { typename HardwareStatusMsg::KeyValue{}; }) {
-      constexpr size_t kValueCount = 5;
-      if (msg.values.size() < kValueCount) {
-        msg.values.resize(kValueCount);
-      }
-      msg.values[0].key = "axis_state";
       auto add_numeric = [&](const std::string &key, double val) {
         char buf[32];
         const int len = std::snprintf(buf, sizeof(buf), "%.6g", val);
@@ -1715,22 +1769,10 @@ void OdriveS1CanSystem::populate_status_messages() {
         return value;
       };
       msg.values[0].value = add_numeric("axis_state", axis_states_[i].axis_state);
-      if (msg.values.size() > 1) {
-        msg.values[1].key = "fault_code";
-        msg.values[1].value = add_numeric("fault_code", axis_states_[i].fault_code);
-      }
-      if (msg.values.size() > 2) {
-        msg.values[2].key = "health_detail";
-        msg.values[2].value = runtime_metadata_[i].fault_detail;
-      }
-      if (msg.values.size() > 3) {
-        msg.values[3].key = "heartbeat_age";
-        msg.values[3].value = add_numeric("heartbeat_age", axis_states_[i].heartbeat_age);
-      }
-      if (msg.values.size() > 4) {
-        msg.values[4].key = "homing_status";
-        msg.values[4].value = add_numeric("homing_status", axis_states_[i].homing_status);
-      }
+      msg.values[1].value = add_numeric("fault_code", axis_states_[i].fault_code);
+      msg.values[2].value = runtime_metadata_[i].fault_detail;
+      msg.values[3].value = add_numeric("heartbeat_age", axis_states_[i].heartbeat_age);
+      msg.values[4].value = add_numeric("homing_status", axis_states_[i].homing_status);
     }
   }
 }
