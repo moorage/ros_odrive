@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            python3-colcon-common-extensions \
+            ros-humble-ros2-control \
+            ros-humble-ros2-controllers \
+            ros-humble-control-msgs \
+            ros-humble-diagnostic-updater \
+            ros-humble-pluginlib \
+            ros-humble-rclcpp \
+            ros-humble-std-srvs \
+            ros-humble-transmission-interface \
+            ros-humble-hardware-interface \
+            git
+
+      - name: Set up workspace
+        run: |
+          mkdir -p /ws/src
+          rsync -a . /ws/src/ros_odrive
+
+      - name: Build
+        working-directory: /ws
+        env:
+          COLCON_EXTENSION_BLACKLIST: "colcon_ros_bundle"
+        run: |
+          . /opt/ros/humble/setup.sh
+          colcon build --merge-install --cmake-args -DBUILD_TESTING=ON
+
+      - name: Test
+        working-directory: /ws
+        run: |
+          . /opt/ros/humble/setup.sh
+          colcon test --merge-install
+          colcon test-result --verbose

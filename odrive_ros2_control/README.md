@@ -51,3 +51,21 @@ Controllers may claim one of:
 ## Tests
 
 Unit and integration tests live under `test/` and are driven with `ament_cmake_gtest`, covering mapping/transmissions, mode switching, limit consistency, fault handling, and CAN routing with a simulated transport.
+
+### Running tests locally
+
+In a ROS 2 Humble workspace:
+
+```bash
+source /opt/ros/humble/setup.sh
+mkdir -p ws/src
+rsync -a . ws/src/ros_odrive
+cd ws
+colcon build --merge-install --cmake-args -DBUILD_TESTING=ON
+colcon test --merge-install
+colcon test-result --verbose
+```
+
+### CI
+
+GitHub Actions (`.github/workflows/ci.yml`) builds and runs the unit/integration test suite inside `ros:humble-ros-base` on every push/PR, ensuring canonical behavior stays covered.

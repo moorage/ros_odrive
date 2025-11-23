@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>odrive_gantry_moveit_example</name>
+  <version>0.0.0</version>
+  <description>
+    Simple 2-DOF gantry / planar arm MoveIt 2 example wired to the ODrive ros2_control hardware plugin.
+    Includes ros2_control + MoveIt bringup, controllers, and simulation-friendly hardware using a fake ODrive CAN server.
+  </description>
+
+  <maintainer email="unknown@example.com">TODO: set maintainer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>odrive_ros2_control</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>controller_manager</depend>
+  <depend>joint_state_broadcaster</depend>
+  <depend>joint_trajectory_controller</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>xacro</depend>
+
+  <depend>moveit_ros_move_group</depend>
+  <depend>moveit_ros_planning_interface</depend>
+  <depend>moveit_kinematics</depend>
+  <depend>moveit_planners_ompl</depend>
+  <depend>moveit_simple_controller_manager</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>launch_testing</test_depend>
+  <test_depend>launch_ros</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>control_msgs</test_depend>
+  <test_depend>trajectory_msgs</test_depend>
+  <test_depend>sensor_msgs</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <hardware_interface plugin="${prefix}/sim_odrive_hardware.xml"/>
+  </export>
+</package>

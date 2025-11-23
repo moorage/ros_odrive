@@ -1,0 +1,122 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="planar_gantry" params="prefix">
+    <xacro:property name="rail_length" value="1.0"/>
+    <xacro:property name="rail_height" value="0.05"/>
+    <xacro:property name="cart_size" value="0.08"/>
+    <xacro:property name="tool_height" value="0.1"/>
+
+    <link name="${prefix}base_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${rail_length} ${rail_length} ${rail_height}"/>
+        </geometry>
+        <material name="gray"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${rail_length} ${rail_length} ${rail_height}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="1.0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <inertia ixx="0.05" ixy="0.0" ixz="0.0" iyy="0.05" iyz="0.0" izz="0.05"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}x_joint" type="prismatic">
+      <parent link="${prefix}base_link"/>
+      <child link="${prefix}x_cart"/>
+      <origin xyz="${-rail_length/2} 0 ${rail_height/2}" rpy="0 0 0"/>
+      <axis xyz="1 0 0"/>
+      <limit lower="-0.4" upper="0.4" effort="40" velocity="0.5"/>
+      <dynamics damping="0.1"/>
+    </joint>
+
+    <link name="${prefix}x_cart">
+      <visual>
+        <origin xyz="${cart_size/2} 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${cart_size} ${cart_size} ${cart_size}"/>
+        </geometry>
+        <material name="green"/>
+      </visual>
+      <collision>
+        <origin xyz="${cart_size/2} 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${cart_size} ${cart_size} ${cart_size}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.5"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}y_joint" type="prismatic">
+      <parent link="${prefix}x_cart"/>
+      <child link="${prefix}y_cart"/>
+      <origin xyz="0 ${-rail_length/2 + cart_size/2} 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="-0.4" upper="0.4" effort="40" velocity="0.5"/>
+      <dynamics damping="0.1"/>
+    </joint>
+
+    <link name="${prefix}y_cart">
+      <visual>
+        <origin xyz="0 ${cart_size/2} 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${cart_size} ${cart_size} ${cart_size}"/>
+        </geometry>
+        <material name="orange"/>
+      </visual>
+      <collision>
+        <origin xyz="0 ${cart_size/2} 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${cart_size} ${cart_size} ${cart_size}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.5"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}yaw_joint" type="revolute">
+      <parent link="${prefix}y_cart"/>
+      <child link="${prefix}tool0"/>
+      <origin xyz="0 ${cart_size/2} 0" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-3.1415" upper="3.1415" effort="20" velocity="1.5"/>
+      <dynamics damping="0.05"/>
+    </joint>
+
+    <link name="${prefix}tool0">
+      <visual>
+        <origin xyz="0 0 ${tool_height/2}" rpy="0 0 0"/>
+        <geometry>
+          <cylinder length="${tool_height}" radius="0.02"/>
+        </geometry>
+        <material name="blue"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${tool_height/2}" rpy="0 0 0"/>
+        <geometry>
+          <cylinder length="${tool_height}" radius="0.02"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.2"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <inertia ixx="0.001" ixy="0.0" ixz="0.0" iyy="0.001" iyz="0.0" izz="0.001"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
+</robot>

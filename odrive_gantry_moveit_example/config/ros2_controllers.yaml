@@ -1,0 +1,32 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    gantry_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+gantry_controller:
+  ros__parameters:
+    joints:
+      - x_joint
+      - y_joint
+      - yaw_joint
+    command_interfaces: ["position", "velocity"]
+    state_interfaces: ["position", "velocity"]
+    allow_partial_joints_goal: false
+    constraints:
+      goal_time: 1.0
+      stopped_velocity_tolerance: 0.01
+      x_joint:
+        goal: 0.01
+      y_joint:
+        goal: 0.01
+      yaw_joint:
+        goal: 0.02
+    gains:  # basic gains for simulated plant
+      x_joint: {p: 20.0, d: 2.0}
+      y_joint: {p: 20.0, d: 2.0}
+      yaw_joint: {p: 8.0, d: 0.5}

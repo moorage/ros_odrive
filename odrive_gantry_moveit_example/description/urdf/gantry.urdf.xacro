@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="odrive_gantry">
+  <xacro:arg name="prefix" default=""/>
+  <xacro:arg name="use_simulated_odrive" default="true"/>
+  <xacro:arg name="can_interface" default="can0"/>
+
+  <xacro:include filename="$(find odrive_gantry_moveit_example)/urdf/gantry_description.urdf.xacro"/>
+  <xacro:include filename="$(find odrive_gantry_moveit_example)/urdf/gantry.ros2_control.xacro"/>
+
+  <xacro:planar_gantry prefix="$(arg prefix)"/>
+  <xacro:gantry_ros2_control
+    name="ODriveGantry"
+    prefix="$(arg prefix)"
+    use_simulated_odrive="$(arg use_simulated_odrive)"
+    can_interface="$(arg can_interface)"/>
+</robot>

@@ -1,0 +1,9 @@
+<library path="sim_odrive_hw">
+  <class name="odrive_gantry_moveit_example/SimulatedOdriveHardware"
+         type="odrive_gantry_moveit_example::SimulatedOdriveHardware"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Simulated ODrive CAN backend used for integration and MoveIt demos without real hardware.
+    </description>
+  </class>
+</library>

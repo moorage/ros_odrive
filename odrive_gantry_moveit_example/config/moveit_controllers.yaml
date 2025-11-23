@@ -1,0 +1,11 @@
+controller_names:
+  - gantry_controller
+
+gantry_controller:
+  action_ns: follow_joint_trajectory
+  type: FollowJointTrajectory
+  default: true
+  joints:
+    - x_joint
+    - y_joint
+    - yaw_joint

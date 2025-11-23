@@ -1,0 +1,12 @@
+<?xml version="1.0" ?>
+<robot name="odrive_gantry">
+  <virtual_joint name="world_joint" type="fixed" parent_frame="world" child_link="base_link"/>
+  <group name="gantry">
+    <joint name="x_joint"/>
+    <joint name="y_joint"/>
+    <joint name="yaw_joint"/>
+  </group>
+  <end_effectors>
+    <end_effector name="tool0" parent_link="tool0" group="gantry"/>
+  </end_effectors>
+</robot>
