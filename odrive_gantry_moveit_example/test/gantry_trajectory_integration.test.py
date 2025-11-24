@@ -12,6 +12,7 @@ import launch_ros.actions
 import pytest
 import rclpy
 from control_msgs.action import FollowJointTrajectory
+from action_msgs.msg import GoalStatus
 from launch import LaunchDescription
 from launch.actions import RegisterEventHandler
 from launch.event_handlers import OnProcessExit
@@ -26,6 +27,9 @@ from rclpy.node import Node as RclpyNode
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
 from rclpy.duration import Duration
+
+JOINT_NAMES = ["x_joint", "y_joint", "yaw_joint"]
+TARGET_POSITIONS = [-0.1, -0.15, -0.6]
 
 
 @pytest.mark.launch_test
@@ -109,7 +113,7 @@ class TrajectoryHarness:
 
     def send_and_wait(self):
         goal = FollowJointTrajectory.Goal()
-        goal.trajectory.joint_names = ["x_joint", "y_joint", "yaw_joint"]
+        goal.trajectory.joint_names = JOINT_NAMES
         goal.trajectory.points = [
             JointTrajectoryPoint(
                 positions=[0.25, 0.2, 0.4],
@@ -117,7 +121,7 @@ class TrajectoryHarness:
                 time_from_start=Duration(seconds=2, nanoseconds=500_000_000).to_msg(),
             ),
             JointTrajectoryPoint(
-                positions=[-0.1, -0.15, -0.6],
+                positions=TARGET_POSITIONS,
                 velocities=[0.0, 0.0, 0.0],
                 time_from_start=Duration(seconds=5).to_msg(),
             ),
@@ -129,17 +133,36 @@ class TrajectoryHarness:
 
         result_future = goal_handle.get_result_async()
         self._executor.spin_until_future_complete(result_future, timeout_sec=15.0)
-        assert result_future.result().status == 0, f"Goal finished with status {result_future.result().status}"
+        assert result_future.result().status == GoalStatus.STATUS_SUCCEEDED, f"Goal finished with status {result_future.result().status}"
 
-    def assert_final_pose(self, tolerance=0.02):
-        end = time.time() + 3.0
+    def assert_final_pose(self, tolerance=0.02, timeout_sec=5.0):
+        end = time.time() + timeout_sec
         while time.time() < end:
             self._executor.spin_once(timeout_sec=0.1)
+            if self._latest_state is None:
+                continue
+
+            idx = {name: i for i, name in enumerate(self._latest_state.name)}
+            all_ok = True
+            for i, joint in enumerate(JOINT_NAMES):
+                if joint not in idx:
+                    all_ok = False
+                    break
+                pos = self._latest_state.position[idx[joint]]
+                target = TARGET_POSITIONS[i]
+                if abs(pos - target) >= tolerance:
+                    all_ok = False
+                    break
+            
+            if all_ok:
+                return
+
         assert self._latest_state is not None, "No joint_states received"
         idx = {name: i for i, name in enumerate(self._latest_state.name)}
-        targets = {"x_joint": -0.1, "y_joint": -0.15, "yaw_joint": -0.6}
-        for joint, target in targets.items():
+        for i, joint in enumerate(JOINT_NAMES):
+            assert joint in idx, f"Joint {joint} not found in state"
             pos = self._latest_state.position[idx[joint]]
+            target = TARGET_POSITIONS[i]
             assert abs(pos - target) < tolerance, f"{joint} final pos {pos} outside tolerance {tolerance}"
 
 
