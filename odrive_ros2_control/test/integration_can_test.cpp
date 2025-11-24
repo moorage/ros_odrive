@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include "odrive_ros2_control/odrive_system.hpp"
 #include <linux/can.h>
@@ -175,6 +177,38 @@ TEST(IntegrationCan, SkipsSendingUnchangedCommandsWithinTolerance) {
   sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
   const size_t after_third = count_frames(fake->sent_frames, axis_can_id(1, 0), Set_Input_Pos_msg_t::cmd_id);
   EXPECT_GT(after_third, after_second);
+}
+
+TEST(IntegrationCan, DebugLoggingEmitsOnSetpointChangesOnly) {
+  TransportOverride guard;
+
+  OdriveS1CanSystem sys;
+  auto info = make_info();
+  info.hardware_parameters["debug_log_setpoints"] = "true";
+  ASSERT_EQ(sys.on_init(info), CallbackReturn::SUCCESS);
+  ASSERT_EQ(sys.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  sys.set_test_log_sink(nullptr);
+  std::vector<std::string> logs;
+  sys.set_test_log_sink([&](const std::string &msg) { logs.push_back(msg); });
+  ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+  auto hb_closed = make_heartbeat(axis_can_id(1, 0), 0x0, AXIS_STATE_CLOSED_LOOP_CONTROL);
+  OdriveSystemTestAccess::handle(sys, hb_closed, rclcpp::Clock().now());
+  sys.perform_command_mode_switch({"joint1/position"}, {});
+
+  auto &cmds = OdriveSystemTestAccess::commands(sys);
+  cmds[0].position = 1.0;
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  ASSERT_FALSE(logs.empty());
+  const size_t first_count = logs.size();
+  EXPECT_NE(logs[0].find("node 1"), std::string::npos);
+
+  cmds[0].position = 1.0; // unchanged -> should not log again
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  EXPECT_EQ(logs.size(), first_count);
+
+  cmds[0].position = 1.2; // change -> should log
+  sys.write(rclcpp::Clock().now(), rclcpp::Duration(0, 0));
+  EXPECT_GT(logs.size(), first_count);
 }
 
 TEST(IntegrationCan, FaultedAxisStopsSendingUntilCleared) {

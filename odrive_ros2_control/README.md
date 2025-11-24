@@ -34,6 +34,7 @@ These are set at the top level of the hardware interface in URDF.
 - `status_publish_rate` (double): Rate [Hz] to publish `HardwareStatus`.
 - `heartbeat_timeout` (double): Timeout [s] for stale heartbeats.
 - `command_tolerance` (double): Threshold for resending unchanged commands.
+- `debug_log_setpoints` (bool): When true, log new setpoints (position/velocity/effort) and the CAN targets; messages are only emitted when values change beyond `command_tolerance`. Defaults to `false`.
 - `limits_check.mode` (string): `OFF`, `WARN_ONLY`, or `STRICT`.
 - `limits_check.velocity_tolerance_ratio` (double): Tolerance ratio for velocity limits.
 - `limits_check.effort_tolerance_ratio` (double): Tolerance ratio for effort limits.
@@ -82,6 +83,23 @@ Load `odrive_ros2_control_plugin/ODriveHardwareInterface` as a ros2_control `Sys
     <state_interface name="heartbeat_age"/>
   </joint>
 </ros2_control>
+```
+
+To debug setpoint routing, enable logging and optionally tighten the tolerance:
+
+```xml
+<hardware>
+  <plugin>odrive_ros2_control_plugin/ODriveHardwareInterface</plugin>
+  <param name="can_interface">can0</param>
+  <param name="debug_log_setpoints">true</param>
+  <param name="command_tolerance">1e-4</param>
+</hardware>
+```
+
+Example output with logging enabled:
+
+```
+[INFO] [OdriveS1CanSystem]: Setpoint for joint joint1 (node 1, axis 0) mode=position pos=1.57 vel_ff=0 effort_ff=0 -> turns=0.25 vel=0 torque=0
 ```
 
 ## Tests

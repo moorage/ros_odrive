@@ -170,6 +170,7 @@ public:
   // Test hooks
   void inject_transport(const std::shared_ptr<CanTransport> &transport) { transport_ = transport; }
   bool start_homing_for_tests() { return start_homing(); }
+  void set_test_log_sink(std::function<void(const std::string &)> cb) { log_sink_for_tests_ = std::move(cb); }
 
 private:
   friend class OdriveSystemTestAccess;
@@ -190,6 +191,7 @@ private:
     double write_latency_warn_sec = 0.02;
     bool fault_idle_on_error = true;
     bool require_rearm_after_fault = true;
+    bool debug_log_setpoints = false;
     bool limits_check_use_sdo = false;
     bool strict_bitrate = true;
     bool skip_can_validation = false;
@@ -279,6 +281,9 @@ private:
   bool send_clear_errors(size_t idx);
   bool send_frame(const can_frame &frame, bool count_budget, const rclcpp::Time &now);
   bool can_send_frame(const rclcpp::Time &now);
+  bool should_log_command(size_t idx, AxisControlMode mode, double pos, double vel, double eff);
+  void log_setpoint(size_t idx, AxisControlMode mode, double pos_joint, double vel_joint, double eff_joint,
+                    double act_pos, double act_vel, double act_effort);
   void update_fault_detail(size_t idx);
   rclcpp::Time now_for_io() const;
 
@@ -307,6 +312,8 @@ private:
   std::vector<std::optional<EndpointInfo>> endpoint_vel_;
   std::vector<std::optional<EndpointInfo>> endpoint_effort_;
   std::vector<std::optional<EndpointInfo>> endpoint_accel_;
+  std::vector<AxisCommand> last_logged_commands_;
+  std::vector<AxisControlMode> last_logged_modes_;
   struct RawSdoValue {
     uint32_t raw = 0;
     rclcpp::Time stamp;
@@ -337,6 +344,7 @@ private:
     double last_send_latency_sec = 0.0;
     bool budget_exceeded_last_cycle = false;
   } util_metrics_;
+  std::function<void(const std::string &)> log_sink_for_tests_;
 
 public:
   using AxisRuntimeMetadataForTests = AxisRuntimeMetadata;

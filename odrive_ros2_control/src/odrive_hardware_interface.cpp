@@ -329,6 +329,7 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   node_status_.can_bitrate = *can_bitrate;
   node_status_.fault_idle_on_error = to_bool(get_param("fault_idle_on_error", "", "true"), true);
   node_status_.require_rearm_after_fault = to_bool(get_param("require_rearm_after_fault", "", "true"), true);
+  node_status_.debug_log_setpoints = to_bool(get_param("debug_log_setpoints", "", "false"), false);
   node_status_.strict_bitrate = to_bool(get_param("can_bitrate_strict", "", "true"), true);
   node_status_.skip_can_validation = to_bool(get_param("skip_can_validation", "", "false"), false);
   auto max_frames_per_cycle = parse_int(get_param("max_frames_per_cycle", "", "0"), "max_frames_per_cycle");
@@ -373,6 +374,8 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   endpoint_vel_.clear();
   endpoint_effort_.clear();
   endpoint_accel_.clear();
+  last_logged_commands_.clear();
+  last_logged_modes_.clear();
 
   for (const auto &joint : info_.joints) {
     AxisConfig cfg;
@@ -448,6 +451,9 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
     axis_can_ids_.push_back(0);
     transmissions_.push_back(std::move(tx));
   }
+
+  last_logged_commands_.assign(axis_configs_.size(), AxisCommand{});
+  last_logged_modes_.assign(axis_configs_.size(), AxisControlMode::IDLE);
 
   hardware_status_cache_.assign(axis_configs_.size(), HardwareStatusMsg{});
   if constexpr (requires { typename HardwareStatusMsg::KeyValue{}; }) {
@@ -971,6 +977,7 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
     const double cmd_vel = axis_commands_[i].velocity;
     const double cmd_eff = axis_commands_[i].effort;
     const double cmd_home = axis_commands_[i].homing;
+    const AxisControlMode mode = command_modes_[i];
 
     if (runtime_metadata_[i].pending_idle_request) {
       send_axis_state(i, AXIS_STATE_IDLE);
@@ -993,6 +1000,7 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
         runtime_metadata_[i].last_homing_result = "requested";
         command_modes_[i] = AxisControlMode::HOMING;
         axis_states_[i].homing_status = 1.0;
+        log_setpoint(i, AxisControlMode::HOMING, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
       } else {
         ok = false;
       }
@@ -1002,24 +1010,25 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
     // Send commands based on the active control mode.
     // We only send commands if the value has changed significantly or if we haven't sent a closed-loop command yet.
     // Do not stream commands until the drive confirms CLOSED_LOOP via heartbeat.
-  if (command_modes_[i] != AxisControlMode::IDLE && command_modes_[i] != AxisControlMode::HOMING) {
-    if (runtime_metadata_[i].awaiting_closed_loop || axis_states_[i].axis_state != AXIS_STATE_CLOSED_LOOP_CONTROL) {
-      runtime_metadata_[i].awaiting_closed_loop = true;
-      if (!runtime_metadata_[i].pending_control_mode) {
-        send_axis_state(i, AXIS_STATE_CLOSED_LOOP_CONTROL);
+    if (mode != AxisControlMode::IDLE && mode != AxisControlMode::HOMING) {
+      if (runtime_metadata_[i].awaiting_closed_loop || axis_states_[i].axis_state != AXIS_STATE_CLOSED_LOOP_CONTROL) {
+        runtime_metadata_[i].awaiting_closed_loop = true;
+        if (!runtime_metadata_[i].pending_control_mode) {
+          send_axis_state(i, AXIS_STATE_CLOSED_LOOP_CONTROL);
+        }
+        continue;
       }
-      continue;
+      runtime_metadata_[i].awaiting_closed_loop = false;
     }
-    runtime_metadata_[i].awaiting_closed_loop = false;
-  }
 
-    switch (command_modes_[i]) {
+    switch (mode) {
       case AxisControlMode::POSITION: {
         const double turns = joint_to_actuator_pos(i, cmd_pos);
         const double vel_ff = joint_vel_to_actuator(i, cmd_vel);
         const double torque_ff = joint_effort_to_actuator(i, cmd_eff);
         const double diff = std::fabs(turns - runtime_metadata_[i].last_cmd_pos);
         if (diff > node_status_.command_tolerance || !runtime_metadata_[i].sent_closed_loop) {
+          log_setpoint(i, mode, cmd_pos, cmd_vel, cmd_eff, turns, vel_ff, torque_ff);
           ok &= send_position_command(i, turns, vel_ff, torque_ff);
           runtime_metadata_[i].last_cmd_pos = turns;
           runtime_metadata_[i].last_cmd_vel = vel_ff;
@@ -1031,6 +1040,7 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
         const double torque_ff = joint_effort_to_actuator(i, cmd_eff);
         if (std::fabs(turns_per_sec - runtime_metadata_[i].last_cmd_vel) > node_status_.command_tolerance ||
             !runtime_metadata_[i].sent_closed_loop) {
+          log_setpoint(i, mode, 0.0, cmd_vel, cmd_eff, 0.0, turns_per_sec, torque_ff);
           ok &= send_velocity_command(i, turns_per_sec, torque_ff);
           runtime_metadata_[i].last_cmd_vel = turns_per_sec;
           runtime_metadata_[i].last_cmd_effort = torque_ff;
@@ -1040,6 +1050,7 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
         const double tq = joint_effort_to_actuator(i, cmd_eff);
         if (std::fabs(tq - runtime_metadata_[i].last_cmd_effort) > node_status_.command_tolerance ||
             !runtime_metadata_[i].sent_closed_loop) {
+          log_setpoint(i, mode, 0.0, 0.0, cmd_eff, 0.0, 0.0, tq);
           ok &= send_torque_command(i, tq);
           runtime_metadata_[i].last_cmd_effort = tq;
         }
@@ -1444,6 +1455,61 @@ bool OdriveS1CanSystem::send_torque_command(size_t idx, double torque) {
   frame.can_dlc = msg.msg_length;
   msg.encode_buf(frame.data);
   return send_frame(frame, true, now_for_io());
+}
+
+bool OdriveS1CanSystem::should_log_command(size_t idx, AxisControlMode mode, double pos, double vel, double eff) {
+  if (idx >= last_logged_commands_.size()) {
+    last_logged_commands_.resize(axis_configs_.size());
+  }
+  if (idx >= last_logged_modes_.size()) {
+    last_logged_modes_.resize(axis_configs_.size(), AxisControlMode::IDLE);
+  }
+  const double tol = node_status_.command_tolerance;
+  const auto &prev = last_logged_commands_[idx];
+  const AxisControlMode prev_mode = last_logged_modes_[idx];
+  const bool pos_changed = std::fabs(pos - prev.position) > tol;
+  const bool vel_changed = std::fabs(vel - prev.velocity) > tol;
+  const bool eff_changed = std::fabs(eff - prev.effort) > tol;
+  const bool mode_changed = mode != prev_mode;
+  if (!(pos_changed || vel_changed || eff_changed || mode_changed)) return false;
+  last_logged_commands_[idx].position = pos;
+  last_logged_commands_[idx].velocity = vel;
+  last_logged_commands_[idx].effort = eff;
+  last_logged_modes_[idx] = mode;
+  return true;
+}
+
+void OdriveS1CanSystem::log_setpoint(
+    size_t idx, AxisControlMode mode, double pos_joint, double vel_joint, double eff_joint,
+    double act_pos, double act_vel, double act_effort) {
+  if (!node_status_.debug_log_setpoints) return;
+  if (!should_log_command(idx, mode, pos_joint, vel_joint, eff_joint)) return;
+  const auto &cfg = axis_configs_[idx];
+  std::ostringstream ss;
+  ss << "Setpoint for joint " << cfg.joint_name << " (node " << cfg.node_id << ", axis " << cfg.axis_index
+     << ") mode=" << mode_to_string(mode);
+  switch (mode) {
+    case AxisControlMode::POSITION:
+      ss << " pos=" << pos_joint << " vel_ff=" << vel_joint << " effort_ff=" << eff_joint
+         << " -> turns=" << act_pos << " vel=" << act_vel << " torque=" << act_effort;
+      break;
+    case AxisControlMode::VELOCITY:
+      ss << " vel=" << vel_joint << " effort_ff=" << eff_joint
+         << " -> turns_per_sec=" << act_vel << " torque=" << act_effort;
+      break;
+    case AxisControlMode::EFFORT:
+      ss << " effort=" << eff_joint << " -> torque=" << act_effort;
+      break;
+    case AxisControlMode::HOMING:
+      ss << " homing requested";
+      break;
+    case AxisControlMode::IDLE:
+    default:
+      ss << " idle";
+      break;
+  }
+  RCLCPP_INFO(rclcpp::get_logger("OdriveS1CanSystem"), "%s", ss.str().c_str());
+  if (log_sink_for_tests_) log_sink_for_tests_(ss.str());
 }
 
 rclcpp::Time OdriveS1CanSystem::now_for_io() const {
