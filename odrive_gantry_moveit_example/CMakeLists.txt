@@ -70,6 +70,16 @@ if(BUILD_TESTING)
     "${WORKSPACE_INSTALL_PREFIX}/odrive_ros2_control"
     "/opt/ros/jazzy"
   )
+  set(TEST_PYTHONPATHS
+    "/opt/ros/jazzy/lib/python3.12/site-packages"
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_gantry_moveit_example/lib/python3.12/site-packages"
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_ros2_control/lib/python3.12/site-packages"
+  )
+  set(TEST_PATHS
+    "/opt/ros/jazzy/bin"
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_gantry_moveit_example/bin"
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_ros2_control/bin"
+  )
   set(TEST_ENV_VARS "")
   foreach(_path IN LISTS TEST_PREFIX_PATHS)
     list(APPEND TEST_ENV_VARS
@@ -77,13 +87,20 @@ if(BUILD_TESTING)
       CMAKE_PREFIX_PATH=${_path}
     )
   endforeach()
+  # Ensure launch tests can import ROS and workspace python packages.
+  string(JOIN ":" TEST_PYTHONPATH_STR ${TEST_PYTHONPATHS})
+  list(APPEND TEST_ENV_VARS "PYTHONPATH=${TEST_PYTHONPATH_STR}:$ENV{PYTHONPATH}")
+  string(JOIN ":" TEST_PATH_STR ${TEST_PATHS} "$ENV{PATH}")
+  list(APPEND TEST_ENV_VARS "PATH=${TEST_PATH_STR}")
+  string(JOIN ":" TEST_LIBRARY_DIRS_STR ${TEST_LIBRARY_DIRS})
+  list(APPEND TEST_ENV_VARS "LD_LIBRARY_PATH=${TEST_LIBRARY_DIRS_STR}:$ENV{LD_LIBRARY_PATH}")
 
-  add_launch_test(test/gantry_trajectory_integration.test.py
-    TARGET gantry_trajectory_integration
+  ament_add_pytest_test(gantry_trajectory_integration
+    test/gantry_trajectory_integration_test.py
     TIMEOUT 120
-    APPEND_LIBRARY_DIRS ${TEST_LIBRARY_DIRS}
     APPEND_ENV ${TEST_ENV_VARS}
   )
+  set_tests_properties(gantry_trajectory_integration PROPERTIES ENVIRONMENT "${TEST_ENV_VARS}")
 endif()
 
 ament_package()

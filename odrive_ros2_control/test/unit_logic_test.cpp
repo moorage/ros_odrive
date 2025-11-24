@@ -5,6 +5,7 @@
 
 #include "odrive_ros2_control/odrive_system.hpp"
 #include "fake_can_transport.hpp"
+#include "test_helpers.hpp"
 
 using odrive_ros2_control::AxisConfig;
 using odrive_ros2_control::AxisControlMode;
@@ -12,6 +13,8 @@ using odrive_ros2_control::AxisHealth;
 using odrive_ros2_control::OdriveS1CanSystem;
 using hardware_interface::CallbackReturn;
 using hardware_interface::return_type;
+using odrive_ros2_control::test_support::TransportOverride;
+using odrive_ros2_control::test_support::make_info;
 
 namespace {
 
@@ -88,41 +91,6 @@ struct OdriveSystemTestAccess {
   static bool clear_and_rearm(OdriveS1CanSystem &sys, size_t idx) { return sys.clear_errors_and_rearm_for_tests(idx); }
   static OdriveS1CanSystem::UtilizationMetricsForTests &util(OdriveS1CanSystem &sys) { return sys.test_utilization(); }
 };
-
-struct TransportOverride {
-  TransportOverride() {
-    odrive_ros2_control::OdriveS1CanSystem::set_transport_factory_for_tests([this]() {
-      transport = std::make_shared<FakeCanTransport>();
-      return transport;
-    });
-  }
-  ~TransportOverride() { odrive_ros2_control::OdriveS1CanSystem::set_transport_factory_for_tests(nullptr); }
-  std::shared_ptr<FakeCanTransport> transport;
-};
-
-hardware_interface::HardwareInfo make_info() {
-  hardware_interface::HardwareInfo info;
-  info.name = "test_hw";
-  info.type = "system";
-  info.hardware_parameters["skip_can_validation"] = "true";
-  for (int i = 0; i < 2; ++i) {
-    hardware_interface::ComponentInfo joint;
-    joint.name = "joint" + std::to_string(i + 1);
-    joint.type = "revolute";
-    hardware_interface::InterfaceInfo pos;
-    pos.name = hardware_interface::HW_IF_POSITION;
-    hardware_interface::InterfaceInfo vel;
-    vel.name = hardware_interface::HW_IF_VELOCITY;
-    hardware_interface::InterfaceInfo eff;
-    eff.name = hardware_interface::HW_IF_EFFORT;
-    joint.command_interfaces = {pos, vel, eff};
-    joint.state_interfaces = {pos, vel, eff};
-    joint.parameters["odrive_node_id"] = std::to_string(i + 1);
-    joint.parameters["odrive_axis_index"] = "0";
-    info.joints.push_back(joint);
-  }
-  return info;
-}
 
 hardware_interface::HardwareInfo make_info_missing_node_id() {
   auto info = make_info();

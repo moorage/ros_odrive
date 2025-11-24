@@ -75,4 +75,9 @@ if(control_msgs_FOUND)
   ament_target_dependencies(integration_can_test control_msgs)
 endif()
 
+# Ensure runtime linker can locate ROS control helper libraries required by the plugin.
+set(_test_env
+  "LD_LIBRARY_PATH=/opt/ros/jazzy/lib:/opt/ros/jazzy/lib/x86_64-linux-gnu:$ENV{LD_LIBRARY_PATH}")
+set_tests_properties(unit_logic_test integration_can_test PROPERTIES ENVIRONMENT "${_test_env}")
+
 ament_package()
