@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <linux/can.h>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -189,7 +190,8 @@ public:
         frames_to_publish.push_back(enc_frame);
 
         Get_Torques_msg_t tq{};
-        tq.Iq_Measured = axis.feedforward_torque;
+        tq.Torque_Target = axis.feedforward_torque;
+        tq.Torque_Estimate = axis.feedforward_torque;
         can_frame tq_frame{};
         tq_frame.can_id = (axis_id << 5) | tq.cmd_id;
         tq_frame.can_dlc = tq.msg_length;

@@ -17,7 +17,6 @@ find_package(controller_manager REQUIRED)
 find_package(joint_trajectory_controller REQUIRED)
 find_package(joint_state_broadcaster REQUIRED)
 find_package(odrive_ros2_control REQUIRED)
-find_package(odrive_base REQUIRED)
 
 add_library(sim_odrive_hw SHARED
   src/simulated_odrive_hardware.cpp
@@ -28,7 +27,9 @@ ament_target_dependencies(sim_odrive_hw
   hardware_interface
   pluginlib
   odrive_ros2_control
-  odrive_base
+)
+target_include_directories(sim_odrive_hw PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../odrive_base/include
 )
 target_compile_features(sim_odrive_hw PUBLIC cxx_std_20)
 
@@ -41,7 +42,7 @@ install(TARGETS sim_odrive_hw
 )
 
 install(
-  DIRECTORY config description launch srdf
+  DIRECTORY config description launch
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -50,9 +51,38 @@ install(FILES sim_odrive_hardware.xml
 )
 
 if(BUILD_TESTING)
+  get_filename_component(WORKSPACE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+  set(WORKSPACE_INSTALL_PREFIX "${WORKSPACE_ROOT}/install")
+  set(TEST_LIBRARY_DIRS
+    "/opt/ros/jazzy/lib"
+    "/opt/ros/jazzy/lib/x86_64-linux-gnu"
+    "/opt/ros/jazzy/opt/sdformat_vendor/lib"
+    "/opt/ros/jazzy/opt/rviz_ogre_vendor/lib"
+    "/opt/ros/jazzy/opt/gz_math_vendor/lib"
+    "/opt/ros/jazzy/opt/gz_utils_vendor/lib"
+    "/opt/ros/jazzy/opt/gz_tools_vendor/lib"
+    "/opt/ros/jazzy/opt/gz_cmake_vendor/lib"
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_ros2_control/lib"
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_gantry_moveit_example/lib"
+  )
+  set(TEST_PREFIX_PATHS
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_gantry_moveit_example"
+    "${WORKSPACE_INSTALL_PREFIX}/odrive_ros2_control"
+    "/opt/ros/jazzy"
+  )
+  set(TEST_ENV_VARS "")
+  foreach(_path IN LISTS TEST_PREFIX_PATHS)
+    list(APPEND TEST_ENV_VARS
+      AMENT_PREFIX_PATH=${_path}
+      CMAKE_PREFIX_PATH=${_path}
+    )
+  endforeach()
+
   add_launch_test(test/gantry_trajectory_integration.test.py
     TARGET gantry_trajectory_integration
     TIMEOUT 120
+    APPEND_LIBRARY_DIRS ${TEST_LIBRARY_DIRS}
+    APPEND_ENV ${TEST_ENV_VARS}
   )
 endif()
 

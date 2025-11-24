@@ -17,26 +17,28 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 
 struct OdriveSystemTestAccess {
-  static std::vector<OdriveS1CanSystem::AxisCommand> &commands(OdriveS1CanSystem &sys) {
-    return sys.axis_commands_;
+  static std::vector<OdriveS1CanSystem::AxisCommandForTests> &commands(OdriveS1CanSystem &sys) {
+    return sys.test_axis_commands();
   }
-  static std::vector<AxisConfig> &configs(OdriveS1CanSystem &sys) { return sys.axis_configs_; }
-  static std::vector<OdriveS1CanSystem::AxisRuntimeMetadata> &runtime(OdriveS1CanSystem &sys) {
-    return sys.runtime_metadata_;
+  static std::vector<AxisConfig> &configs(OdriveS1CanSystem &sys) { return sys.test_axis_configs(); }
+  static std::vector<OdriveS1CanSystem::AxisRuntimeMetadataForTests> &runtime(OdriveS1CanSystem &sys) {
+    return sys.test_runtime_metadata();
   }
-  static std::vector<odrive_ros2_control::AxisState> &states(OdriveS1CanSystem &sys) { return sys.axis_states_; }
-  static std::vector<AxisControlMode> &modes(OdriveS1CanSystem &sys) { return sys.command_modes_; }
+  static std::vector<odrive_ros2_control::AxisState> &states(OdriveS1CanSystem &sys) { return sys.test_axis_states(); }
+  static std::vector<AxisControlMode> &modes(OdriveS1CanSystem &sys) { return sys.test_command_modes(); }
   static void handle(OdriveS1CanSystem &sys, const can_frame &frame, const rclcpp::Time &t) {
-    sys.handle_frame(frame, t);
+    sys.handle_frame_for_tests(frame, t);
   }
   static std::vector<odrive_ros2_control::HardwareStatusMsg> &status(OdriveS1CanSystem &sys) {
-    return sys.hardware_status_cache_;
+    return sys.test_status_cache();
   }
-  static odrive_ros2_control::OdriveS1CanSystem::UtilizationMetrics &util(OdriveS1CanSystem &sys) {
-    return sys.util_metrics_;
+  static odrive_ros2_control::OdriveS1CanSystem::UtilizationMetricsForTests &util(OdriveS1CanSystem &sys) {
+    return sys.test_utilization();
   }
-  static bool send_clear(OdriveS1CanSystem &sys, size_t idx) { return sys.send_clear_errors(idx); }
-  static bool clear_and_rearm(OdriveS1CanSystem &sys, size_t idx) { return sys.clear_errors_and_rearm(idx); }
+  static bool send_clear(OdriveS1CanSystem &sys, size_t idx) { return sys.send_clear_errors_for_tests(idx); }
+  static bool clear_and_rearm(OdriveS1CanSystem &sys, size_t idx) {
+    return sys.clear_errors_and_rearm_for_tests(idx);
+  }
   static bool start_homing(OdriveS1CanSystem &sys) { return sys.start_homing_for_tests(); }
 };
 
@@ -145,13 +147,13 @@ TEST(IntegrationCan, TransmissionMappingAppliedForCommandsAndState) {
   hardware_interface::TransmissionInfo tr;
   tr.name = "t1";
   tr.type = "SimpleTransmission";
-  hardware_interface::TransmissionJointInfo jinfo;
+  hardware_interface::JointInfo jinfo;
   jinfo.name = "joint1";
-  jinfo.parameters["mechanical_reduction"] = "2.0";
+  jinfo.mechanical_reduction = 2.0;
   tr.joints.push_back(jinfo);
-  hardware_interface::TransmissionActuatorInfo ainfo;
+  hardware_interface::ActuatorInfo ainfo;
   ainfo.name = "motor1";
-  ainfo.parameters["mechanical_reduction"] = "2.0";
+  ainfo.mechanical_reduction = 2.0;
   tr.actuators.push_back(ainfo);
   info.transmissions.push_back(tr);
 
@@ -529,7 +531,7 @@ TEST(IntegrationCan, LimitMismatchWarnOnlyAllowsActivateAndWarns) {
 
   ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
   EXPECT_EQ(OdriveSystemTestAccess::runtime(sys)[0].limit_check_result,
-            odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadata::LimitCheckResult::WARN);
+            odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadataForTests::LimitCheckResult::WARN);
   EXPECT_EQ(OdriveSystemTestAccess::states(sys)[0].health, AxisHealth::WARNING);
 
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
@@ -673,7 +675,7 @@ TEST(IntegrationCan, LimitCheckWarnOnlyAcrossAllLimitsWithSdoPrismatic) {
   ASSERT_EQ(sys.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
   const auto &meta = OdriveSystemTestAccess::runtime(sys)[0];
   EXPECT_EQ(meta.limit_check_result,
-            odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadata::LimitCheckResult::WARN);
+            odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadataForTests::LimitCheckResult::WARN);
   EXPECT_EQ(OdriveSystemTestAccess::states(sys)[0].health, AxisHealth::WARNING);
 
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
@@ -823,7 +825,7 @@ TEST(IntegrationCan, LimitCheckUsesSdoWhenEnabled) {
   EXPECT_TRUE(meta.odrive_effort_limit.has_value());
   EXPECT_TRUE(meta.odrive_accel_limit.has_value());
   EXPECT_EQ(meta.limit_check_result,
-            odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadata::LimitCheckResult::OK);
+            odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadataForTests::LimitCheckResult::OK);
 
   OdriveS1CanSystem::set_transport_factory_for_tests(nullptr);
 }

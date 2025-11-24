@@ -12,7 +12,6 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <build_depend>odrive_base</build_depend>
   <build_depend>odrive_ros2_control</build_depend>
   <build_depend>rclcpp</build_depend>
   <build_depend>rclcpp_lifecycle</build_depend>
@@ -22,7 +21,6 @@
   <build_depend>joint_state_broadcaster</build_depend>
   <build_depend>joint_trajectory_controller</build_depend>
 
-  <build_export_depend>odrive_base</build_export_depend>
   <build_export_depend>odrive_ros2_control</build_export_depend>
   <build_export_depend>rclcpp</build_export_depend>
   <build_export_depend>rclcpp_lifecycle</build_export_depend>

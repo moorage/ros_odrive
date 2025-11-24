@@ -18,75 +18,75 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 
 struct OdriveSystemTestAccess {
-  using LimitCheckResult = OdriveS1CanSystem::AxisRuntimeMetadata::LimitCheckResult;
+  using LimitCheckResult = OdriveS1CanSystem::AxisRuntimeMetadataForTests::LimitCheckResult;
   static double joint_to_actuator_pos(OdriveS1CanSystem &sys, const AxisConfig &cfg, double pos) {
-    auto &vec = configs(sys);
+    auto &vec = sys.test_axis_configs();
     if (vec.empty()) {
       vec.push_back(cfg);
     } else {
       vec[0] = cfg;
     }
-    auto &tx = sys.transmissions_;
+    auto &tx = sys.test_transmissions();
     if (tx.size() < vec.size()) tx.resize(vec.size());
-    return sys.joint_to_actuator_pos(0, pos);
+    return sys.joint_to_actuator_pos_for_tests(0, pos);
   }
   static double actuator_to_joint_pos(OdriveS1CanSystem &sys, const AxisConfig &cfg, double turns) {
-    auto &vec = configs(sys);
+    auto &vec = sys.test_axis_configs();
     if (vec.empty()) {
       vec.push_back(cfg);
     } else {
       vec[0] = cfg;
     }
-    auto &tx = sys.transmissions_;
+    auto &tx = sys.test_transmissions();
     if (tx.size() < vec.size()) tx.resize(vec.size());
-    return sys.actuator_to_joint_pos(0, turns);
+    return sys.actuator_to_joint_pos_for_tests(0, turns);
   }
   static double joint_vel_to_actuator(OdriveS1CanSystem &sys, const AxisConfig &cfg, double vel) {
-    auto &vec = configs(sys);
+    auto &vec = sys.test_axis_configs();
     if (vec.empty()) {
       vec.push_back(cfg);
     } else {
       vec[0] = cfg;
     }
-    auto &tx = sys.transmissions_;
+    auto &tx = sys.test_transmissions();
     if (tx.size() < vec.size()) tx.resize(vec.size());
-    return sys.joint_vel_to_actuator(0, vel);
+    return sys.joint_vel_to_actuator_for_tests(0, vel);
   }
   static double actuator_vel_to_joint(OdriveS1CanSystem &sys, const AxisConfig &cfg, double vel) {
-    auto &vec = configs(sys);
+    auto &vec = sys.test_axis_configs();
     if (vec.empty()) {
       vec.push_back(cfg);
     } else {
       vec[0] = cfg;
     }
-    auto &tx = sys.transmissions_;
+    auto &tx = sys.test_transmissions();
     if (tx.size() < vec.size()) tx.resize(vec.size());
-    return sys.actuator_vel_to_joint(0, vel);
+    return sys.actuator_vel_to_joint_for_tests(0, vel);
   }
   static double joint_to_actuator_pos_at(OdriveS1CanSystem &sys, size_t idx, double pos) {
-    return sys.joint_to_actuator_pos(idx, pos);
+    return sys.joint_to_actuator_pos_for_tests(idx, pos);
   }
   static double actuator_to_joint_pos_at(OdriveS1CanSystem &sys, size_t idx, double turns) {
-    return sys.actuator_to_joint_pos(idx, turns);
+    return sys.actuator_to_joint_pos_for_tests(idx, turns);
   }
-  static bool run_limit_check(OdriveS1CanSystem &sys, size_t idx) { return sys.run_limit_check(idx); }
+  static bool run_limit_check(OdriveS1CanSystem &sys, size_t idx) { return sys.run_limit_check_for_tests(idx); }
   static void handle(OdriveS1CanSystem &sys, const can_frame &frame, const rclcpp::Time &t) {
-    sys.handle_frame(frame, t);
+    sys.handle_frame_for_tests(frame, t);
   }
-  static std::vector<OdriveS1CanSystem::AxisRuntimeMetadata> &runtime(OdriveS1CanSystem &sys) {
-    return sys.runtime_metadata_;
+  static std::vector<OdriveS1CanSystem::AxisRuntimeMetadataForTests> &runtime(OdriveS1CanSystem &sys) {
+    return sys.test_runtime_metadata();
   }
-  static std::vector<AxisConfig> &configs(OdriveS1CanSystem &sys) { return sys.axis_configs_; }
-  static std::vector<odrive_ros2_control::AxisState> &states(OdriveS1CanSystem &sys) { return sys.axis_states_; }
+  static std::vector<AxisConfig> &configs(OdriveS1CanSystem &sys) { return sys.test_axis_configs(); }
+  static std::vector<odrive_ros2_control::AxisState> &states(OdriveS1CanSystem &sys) { return sys.test_axis_states(); }
   static std::vector<odrive_ros2_control::HardwareStatusMsg> &status(OdriveS1CanSystem &sys) {
-    return sys.hardware_status_cache_;
+    return sys.test_status_cache();
   }
-  static void populate_status(OdriveS1CanSystem &sys) { sys.populate_status_messages(); }
+  static void populate_status(OdriveS1CanSystem &sys) { sys.populate_status_for_tests(); }
   static void refresh_health(OdriveS1CanSystem &sys, size_t idx) {
-    sys.update_health(idx, rclcpp::Clock(RCL_STEADY_TIME).now(), false);
+    sys.update_health_for_tests(idx, rclcpp::Clock(RCL_STEADY_TIME).now(), false);
   }
-  static bool clear_and_rearm(OdriveS1CanSystem &sys, size_t idx) { return sys.clear_errors_and_rearm(idx); }
-  static OdriveS1CanSystem::UtilizationMetrics &util(OdriveS1CanSystem &sys) { return sys.util_metrics_; }
+  static bool clear_and_rearm(OdriveS1CanSystem &sys, size_t idx) { return sys.clear_errors_and_rearm_for_tests(idx); }
+  static OdriveS1CanSystem::UtilizationMetricsForTests &util(OdriveS1CanSystem &sys) { return sys.test_utilization(); }
 };
 
 struct TransportOverride {
@@ -173,9 +173,9 @@ hardware_interface::HardwareInfo make_info_with_transmission_and_zero_ratio() {
   hardware_interface::TransmissionInfo tr;
   tr.name = "t1";
   tr.type = "SimpleTransmission";
-  hardware_interface::TransmissionJointInfo jinfo;
+  hardware_interface::JointInfo jinfo;
   jinfo.name = "joint1";
-  jinfo.parameters["mechanical_reduction"] = "0.0";
+  jinfo.mechanical_reduction = 0.0;
   tr.joints.push_back(jinfo);
   info.transmissions.push_back(tr);
   return info;
@@ -186,9 +186,9 @@ hardware_interface::HardwareInfo make_info_with_transmission_and_negative_ratio(
   hardware_interface::TransmissionInfo tr;
   tr.name = "t1";
   tr.type = "SimpleTransmission";
-  hardware_interface::TransmissionJointInfo jinfo;
+  hardware_interface::JointInfo jinfo;
   jinfo.name = "joint1";
-  jinfo.parameters["mechanical_reduction"] = "-3.0";
+  jinfo.mechanical_reduction = -3.0;
   tr.joints.push_back(jinfo);
   info.transmissions.push_back(tr);
   return info;
@@ -228,13 +228,13 @@ TEST(AxisMapping, SimpleTransmissionRevoluteMapping) {
   hardware_interface::TransmissionInfo tr;
   tr.name = "t1";
   tr.type = "SimpleTransmission";
-  hardware_interface::TransmissionJointInfo jinfo;
+  hardware_interface::JointInfo jinfo;
   jinfo.name = "joint1";
-  jinfo.parameters["mechanical_reduction"] = "2.0";
+  jinfo.mechanical_reduction = 2.0;
   tr.joints.push_back(jinfo);
-  hardware_interface::TransmissionActuatorInfo ainfo;
+  hardware_interface::ActuatorInfo ainfo;
   ainfo.name = "motor1";
-  ainfo.parameters["mechanical_reduction"] = "2.0";
+  ainfo.mechanical_reduction = 2.0;
   tr.actuators.push_back(ainfo);
   info.transmissions.push_back(tr);
 
@@ -253,13 +253,13 @@ TEST(AxisMapping, SimpleTransmissionPrismaticMapping) {
   hardware_interface::TransmissionInfo tr;
   tr.name = "t1";
   tr.type = "SimpleTransmission";
-  hardware_interface::TransmissionJointInfo jinfo;
+  hardware_interface::JointInfo jinfo;
   jinfo.name = "joint1";
-  jinfo.parameters["mechanical_reduction"] = "1.0";
+  jinfo.mechanical_reduction = 1.0;
   tr.joints.push_back(jinfo);
-  hardware_interface::TransmissionActuatorInfo ainfo;
+  hardware_interface::ActuatorInfo ainfo;
   ainfo.name = "motor1";
-  ainfo.parameters["mechanical_reduction"] = "1.0";
+  ainfo.mechanical_reduction = 1.0;
   tr.actuators.push_back(ainfo);
   info.transmissions.push_back(tr);
 
@@ -308,7 +308,7 @@ TEST(FaultHandling, HeartbeatErrorFlagsAxis) {
   hb.Axis_State = AXIS_STATE_CLOSED_LOOP_CONTROL;
   hb.Axis_Error = 0;
   can_frame frame{};
-  frame.can_id = (1u << 5) | Heartbeat_msg_t::cmd_id;
+  frame.can_id = (2u << 5) | Heartbeat_msg_t::cmd_id;
   frame.can_dlc = Heartbeat_msg_t::msg_length;
   hb.encode_buf(frame.data);
   OdriveSystemTestAccess::handle(sys, frame, rclcpp::Clock().now());
@@ -335,7 +335,7 @@ TEST(FaultHandling, FaultRequiresExplicitRearm) {
   hb.Axis_State = AXIS_STATE_CLOSED_LOOP_CONTROL;
   hb.Axis_Error = 0x5;
   can_frame frame{};
-  frame.can_id = (1u << 5) | Heartbeat_msg_t::cmd_id;
+  frame.can_id = (2u << 5) | Heartbeat_msg_t::cmd_id;
   frame.can_dlc = Heartbeat_msg_t::msg_length;
   hb.encode_buf(frame.data);
   OdriveSystemTestAccess::handle(sys, frame, rclcpp::Clock().now());
@@ -359,7 +359,7 @@ TEST(FaultHandling, GetErrorDisarmTriggersFaultDetail) {
   OdriveS1CanSystem sys;
   ASSERT_EQ(sys.on_init(make_info()), CallbackReturn::SUCCESS);
   can_frame frame{};
-  frame.can_id = (1u << 5) | Get_Error_msg_t::cmd_id;
+  frame.can_id = (2u << 5) | Get_Error_msg_t::cmd_id;
   frame.can_dlc = Get_Error_msg_t::msg_length;
   Get_Error_msg_t err{};
   err.Active_Errors = 0;

@@ -19,6 +19,7 @@ from launch.substitutions import Command, FindExecutable, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_testing.actions import ReadyToTest
 from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node as RclpyNode
@@ -79,7 +80,8 @@ def generate_test_description():
         event_handler=OnProcessExit(target_action=jsb, on_exit=[traj])
     )
 
-    return LaunchDescription([control_node, rsp, jsb, delayed_traj]), {"control_node": control_node}
+    ld = LaunchDescription([control_node, rsp, jsb, delayed_traj, ReadyToTest()])
+    return ld, {"control_node": control_node}
 
 
 class TrajectoryHarness:

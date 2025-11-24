@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -8,12 +9,12 @@
 #include <vector>
 
 #include "can_simple_messages.hpp"
+#include "odrive_enums.h"
 #include "odrive_ros2_control/hardware_status_compat.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/state.hpp"
-#include "transmission_interface/simple_transmission.hpp"
 
 struct can_frame; // forward declaration to keep header portable
 
@@ -47,6 +48,7 @@ struct AxisConfig {
   std::optional<double> gear_ratio;
   std::optional<double> lead_screw_pitch;
   std::optional<double> torque_constant;
+  std::optional<double> joint_offset;
   bool has_transmission = false;
   std::optional<double> limit_velocity;
   std::optional<double> limit_effort;
@@ -196,7 +198,7 @@ private:
     LimitCheckConfig limit_check_config;
     std::string can_interface;
     uint32_t can_bitrate = 0;
-    std::string default_mode = "position";
+    std::string default_mode = "idle";
   };
 
   struct AxisRuntimeMetadata {
@@ -205,6 +207,7 @@ private:
     double last_cmd_effort = 0.0;
     bool sent_closed_loop = false;
     bool homing_requested = false;
+    AxisControlMode mode_before_fault = AxisControlMode::IDLE;
     std::optional<double> odrive_velocity_limit;
     std::optional<double> odrive_effort_limit;
     std::optional<double> odrive_accel_limit;
@@ -225,16 +228,9 @@ private:
   };
 
   struct TransmissionData {
-    std::unique_ptr<transmission_interface::SimpleTransmission> transmission;
-    transmission_interface::ActuatorData actuator_data;
-    transmission_interface::JointData joint_data;
-    double actuator_pos = 0.0;
-    double actuator_vel = 0.0;
-    double actuator_effort = 0.0;
-    double joint_pos = 0.0;
-    double joint_vel = 0.0;
-    double joint_effort = 0.0;
-    bool valid() const { return static_cast<bool>(transmission); }
+    double reduction = 1.0;
+    double joint_offset = 0.0;
+    bool valid() const { return std::isfinite(reduction) && reduction != 0.0; }
   };
 
   AxisControlMode string_to_mode(const std::string &mode) const;
@@ -341,6 +337,31 @@ private:
     double last_send_latency_sec = 0.0;
     bool budget_exceeded_last_cycle = false;
   } util_metrics_;
+
+public:
+  using AxisRuntimeMetadataForTests = AxisRuntimeMetadata;
+  using AxisCommandForTests = AxisCommand;
+  using UtilizationMetricsForTests = UtilizationMetrics;
+  std::vector<AxisConfig> &test_axis_configs() { return axis_configs_; }
+  std::vector<AxisState> &test_axis_states() { return axis_states_; }
+  std::vector<AxisCommand> &test_axis_commands() { return axis_commands_; }
+  std::vector<AxisControlMode> &test_command_modes() { return command_modes_; }
+  std::vector<AxisRuntimeMetadata> &test_runtime_metadata() { return runtime_metadata_; }
+  std::vector<HardwareStatusMsg> &test_status_cache() { return hardware_status_cache_; }
+  std::vector<std::optional<TransmissionData>> &test_transmissions() { return transmissions_; }
+  UtilizationMetrics &test_utilization() { return util_metrics_; }
+  double joint_to_actuator_pos_for_tests(size_t idx, double joint_pos) { return joint_to_actuator_pos(idx, joint_pos); }
+  double actuator_to_joint_pos_for_tests(size_t idx, double turns) { return actuator_to_joint_pos(idx, turns); }
+  double joint_vel_to_actuator_for_tests(size_t idx, double vel) { return joint_vel_to_actuator(idx, vel); }
+  double actuator_vel_to_joint_for_tests(size_t idx, double vel) { return actuator_vel_to_joint(idx, vel); }
+  bool run_limit_check_for_tests(size_t idx) { return run_limit_check(idx); }
+  void handle_frame_for_tests(const can_frame &frame, const rclcpp::Time &stamp) { handle_frame(frame, stamp); }
+  bool clear_errors_and_rearm_for_tests(size_t idx) { return clear_errors_and_rearm(idx); }
+  bool send_clear_errors_for_tests(size_t idx) { return send_clear_errors(idx); }
+  void populate_status_for_tests() { populate_status_messages(); }
+  void update_health_for_tests(size_t idx, const rclcpp::Time &now, bool heartbeat_refresh) {
+    update_health(idx, now, heartbeat_refresh);
+  }
 };
 
 using ODriveHardwareInterface = OdriveS1CanSystem;

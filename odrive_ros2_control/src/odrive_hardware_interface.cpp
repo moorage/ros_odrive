@@ -135,7 +135,20 @@ OdriveS1CanSystem::OdriveS1CanSystem(CanTransportFactory factory) {
 }
 
 void OdriveS1CanSystem::set_transport_factory_for_tests(const CanTransportFactory &factory) {
-  transport_factory_override_ = factory;
+  if (factory) {
+    // Create one instance eagerly so test code can attach hooks before lifecycle callbacks run.
+    auto first_instance = factory();
+    transport_factory_override_ = [factory, first_instance]() mutable {
+      if (first_instance) {
+        auto out = first_instance;
+        first_instance.reset();
+        return out;
+      }
+      return factory();
+    };
+  } else {
+    transport_factory_override_ = nullptr;
+  }
 }
 
 AxisControlMode OdriveS1CanSystem::string_to_mode(const std::string &mode) const {
@@ -158,7 +171,15 @@ const char *OdriveS1CanSystem::mode_to_string(AxisControlMode mode) const {
 
 void OdriveS1CanSystem::load_flat_endpoints() {
   if (node_status_.flat_endpoints_path.empty()) return;
-  std::ifstream f(node_status_.flat_endpoints_path);
+  std::filesystem::path p = node_status_.flat_endpoints_path;
+  if (!p.is_absolute()) {
+    const auto source_root = std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto candidate = source_root / p;
+    if (std::filesystem::exists(candidate)) {
+      p = candidate;
+    }
+  }
+  std::ifstream f(p);
   if (!f.is_open()) {
     RCLCPP_WARN(
         rclcpp::get_logger("OdriveS1CanSystem"),
@@ -302,7 +323,7 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   auto can_util_limit = parse_double(get_param("can_utilization_limit", "", "0.85"), "can_utilization_limit");
   if (!can_util_limit) return CallbackReturn::ERROR;
   node_status_.can_utilization_limit = *can_util_limit;
-  node_status_.default_mode = get_param("default_mode", "", "position");
+  node_status_.default_mode = get_param("default_mode", "", "idle");
   auto can_bitrate = parse_uint32(get_param("can_bitrate", "", "1000000"), "can_bitrate");
   if (!can_bitrate) return CallbackReturn::ERROR;
   node_status_.can_bitrate = *can_bitrate;
@@ -398,14 +419,7 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
       for (const auto &tr : info_.transmissions) {
         for (const auto &j : tr.joints) {
           if (j.name != joint.name) continue;
-          auto it = j.parameters.find("mechanical_reduction");
-          if (it != j.parameters.end()) {
-            cfg.gear_ratio = parse_double(it->second, "mechanical_reduction");
-          }
-          auto it2 = j.parameters.find("mechanicalReduction");
-          if (it2 != j.parameters.end()) {
-            cfg.gear_ratio = parse_double(it2->second, "mechanicalReduction");
-          }
+          cfg.gear_ratio = j.mechanical_reduction;
         }
       }
     }
@@ -416,32 +430,20 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
       for (const auto &tr : info_.transmissions) {
         for (const auto &j : tr.joints) {
           if (j.name != joint.name) continue;
-          auto it_off = j.parameters.find("offset");
-          if (it_off != j.parameters.end()) {
-            if (auto parsed = parse_double(it_off->second, "offset")) {
-              joint_offset = *parsed;
-            } else {
-              return CallbackReturn::ERROR;
-            }
-          }
+          joint_offset = j.offset;
+          if (!cfg.gear_ratio) cfg.gear_ratio = j.mechanical_reduction;
         }
       }
-      // Build a SimpleTransmission to use the upstream mapping semantics.
-      double reduction = cfg.gear_ratio.value_or(1.0);
+      cfg.joint_offset = joint_offset;
       tx = TransmissionData{};
-      tx->transmission = std::make_unique<transmission_interface::SimpleTransmission>(reduction, joint_offset);
-      tx->actuator_data.position = {&tx->actuator_pos};
-      tx->actuator_data.velocity = {&tx->actuator_vel};
-      tx->actuator_data.effort = {&tx->actuator_effort};
-      tx->joint_data.position = {&tx->joint_pos};
-      tx->joint_data.velocity = {&tx->joint_vel};
-      tx->joint_data.effort = {&tx->joint_effort};
+      tx->reduction = cfg.gear_ratio.value_or(1.0);
+      tx->joint_offset = joint_offset;
     }
 
     axis_configs_.push_back(cfg);
     axis_states_.emplace_back();
     axis_commands_.emplace_back();
-    command_modes_.push_back(string_to_mode(node_status_.default_mode));
+    command_modes_.push_back(AxisControlMode::IDLE);
     runtime_metadata_.emplace_back();
     axis_can_ids_.push_back(0);
     transmissions_.push_back(std::move(tx));
@@ -472,9 +474,20 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
 
 bool OdriveS1CanSystem::validate_parameters() {
   std::unordered_map<int, int> node_usage;
+  for (const auto &cfg : axis_configs_) {
+    node_usage[cfg.node_id] += 1;
+  }
+  for (const auto &kv : node_usage) {
+    if (kv.second > 1) {
+      RCLCPP_ERROR(
+          rclcpp::get_logger("OdriveS1CanSystem"),
+          "CAN node_id %d used by %d joints; limit is 1 axis per ODrive S1", kv.first, kv.second);
+      return false;
+    }
+  }
+
   for (size_t idx = 0; idx < axis_configs_.size(); ++idx) {
     const auto &cfg = axis_configs_[idx];
-    node_usage[cfg.node_id] += 1;
     if (cfg.joint_type != "revolute" && cfg.joint_type != "continuous" && cfg.joint_type != "prismatic") {
       RCLCPP_ERROR(
           rclcpp::get_logger("OdriveS1CanSystem"),
@@ -557,15 +570,6 @@ bool OdriveS1CanSystem::validate_parameters() {
   if (node_status_.can_bitrate == 0) {
     RCLCPP_ERROR(rclcpp::get_logger("OdriveS1CanSystem"), "can_bitrate must be > 0");
     return false;
-  }
-
-  for (const auto &kv : node_usage) {
-    if (kv.second > 2) {
-      RCLCPP_ERROR(
-          rclcpp::get_logger("OdriveS1CanSystem"),
-          "CAN node_id %d used by %d joints; limit is 2 axes per ODrive", kv.first, kv.second);
-      return false;
-    }
   }
 
   return true;
@@ -680,33 +684,25 @@ CallbackReturn OdriveS1CanSystem::on_deactivate(const rclcpp_lifecycle::State &)
 
 std::vector<hardware_interface::StateInterface> OdriveS1CanSystem::export_state_interfaces() {
   std::vector<hardware_interface::StateInterface> state_interfaces;
-  state_interfaces.reserve(info_.joints.size() * 3); // heuristic
+  state_interfaces.reserve(info_.joints.size() * 9); // includes diagnostics
 
   auto add_iface = [&](size_t idx, const std::string &name, double *ptr) {
     state_interfaces.emplace_back(axis_configs_[idx].joint_name, name, ptr);
   };
 
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
+    bool has_pos = false, has_vel = false, has_eff = false;
     for (const auto &iface : info_.joints[i].state_interfaces) {
       const auto &name = iface.name;
       if (name == hardware_interface::HW_IF_POSITION) {
+        has_pos = true;
         add_iface(i, name, &axis_states_[i].pos_joint);
       } else if (name == hardware_interface::HW_IF_VELOCITY) {
+        has_vel = true;
         add_iface(i, name, &axis_states_[i].vel_joint);
       } else if (name == hardware_interface::HW_IF_EFFORT) {
+        has_eff = true;
         add_iface(i, name, &axis_states_[i].effort_joint);
-      } else if (name == "health") {
-        add_iface(i, name, &axis_states_[i].health_numeric);
-      } else if (name == "axis_state") {
-        add_iface(i, name, &axis_states_[i].axis_state_report);
-      } else if (name == "power_state") {
-        add_iface(i, name, &axis_states_[i].power_state_numeric);
-      } else if (name == "fault_code") {
-        add_iface(i, name, &axis_states_[i].fault_code);
-      } else if (name == "heartbeat_age") {
-        add_iface(i, name, &axis_states_[i].heartbeat_age);
-      } else if (name == "homing_status") {
-        add_iface(i, name, &axis_states_[i].homing_status);
       } else {
         RCLCPP_WARN(
             rclcpp::get_logger("OdriveS1CanSystem"),
@@ -714,28 +710,42 @@ std::vector<hardware_interface::StateInterface> OdriveS1CanSystem::export_state_
             name.c_str(), axis_configs_[i].joint_name.c_str());
       }
     }
+    if (!has_pos) add_iface(i, hardware_interface::HW_IF_POSITION, &axis_states_[i].pos_joint);
+    if (!has_vel) add_iface(i, hardware_interface::HW_IF_VELOCITY, &axis_states_[i].vel_joint);
+    if (!has_eff) add_iface(i, hardware_interface::HW_IF_EFFORT, &axis_states_[i].effort_joint);
+    add_iface(i, "health", &axis_states_[i].health_numeric);
+    add_iface(i, "axis_state", &axis_states_[i].axis_state_report);
+    add_iface(i, "power_state", &axis_states_[i].power_state_numeric);
+    add_iface(i, "fault_code", &axis_states_[i].fault_code);
+    add_iface(i, "heartbeat_age", &axis_states_[i].heartbeat_age);
+    add_iface(i, "homing_status", &axis_states_[i].homing_status);
   }
   return state_interfaces;
 }
 
 std::vector<hardware_interface::CommandInterface> OdriveS1CanSystem::export_command_interfaces() {
   std::vector<hardware_interface::CommandInterface> cmd_interfaces;
-  cmd_interfaces.reserve(info_.joints.size() * 2); // heuristic
+  cmd_interfaces.reserve(info_.joints.size() * 4); // include homing command
 
   auto add_iface = [&](size_t idx, const std::string &name, double *ptr) {
     cmd_interfaces.emplace_back(axis_configs_[idx].joint_name, name, ptr);
   };
 
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
+    bool has_pos = false, has_vel = false, has_eff = false, has_home = false;
     for (const auto &iface : info_.joints[i].command_interfaces) {
       const auto &name = iface.name;
       if (name == hardware_interface::HW_IF_POSITION) {
+        has_pos = true;
         add_iface(i, name, &axis_commands_[i].position);
       } else if (name == hardware_interface::HW_IF_VELOCITY) {
+        has_vel = true;
         add_iface(i, name, &axis_commands_[i].velocity);
       } else if (name == hardware_interface::HW_IF_EFFORT) {
+        has_eff = true;
         add_iface(i, name, &axis_commands_[i].effort);
       } else if (name == "homing") {
+        has_home = true;
         add_iface(i, name, &axis_commands_[i].homing);
       } else {
         RCLCPP_WARN(
@@ -744,6 +754,10 @@ std::vector<hardware_interface::CommandInterface> OdriveS1CanSystem::export_comm
             name.c_str(), axis_configs_[i].joint_name.c_str());
       }
     }
+    if (!has_pos) add_iface(i, hardware_interface::HW_IF_POSITION, &axis_commands_[i].position);
+    if (!has_vel) add_iface(i, hardware_interface::HW_IF_VELOCITY, &axis_commands_[i].velocity);
+    if (!has_eff) add_iface(i, hardware_interface::HW_IF_EFFORT, &axis_commands_[i].effort);
+    if (!has_home) add_iface(i, "homing", &axis_commands_[i].homing);
   }
   return cmd_interfaces;
 }
@@ -764,6 +778,15 @@ return_type OdriveS1CanSystem::prepare_command_mode_switch(
       return return_type::ERROR;
     }
   }
+
+  auto interface_for_mode = [](AxisControlMode mode) -> std::string {
+    switch (mode) {
+      case AxisControlMode::POSITION: return hardware_interface::HW_IF_POSITION;
+      case AxisControlMode::VELOCITY: return hardware_interface::HW_IF_VELOCITY;
+      case AxisControlMode::EFFORT: return hardware_interface::HW_IF_EFFORT;
+      default: return "";
+    }
+  };
 
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
     AxisControlMode mode = command_modes_[i];
@@ -786,31 +809,22 @@ return_type OdriveS1CanSystem::prepare_command_mode_switch(
     }
     if (std::find(start_interfaces.begin(), start_interfaces.end(), base + hardware_interface::HW_IF_VELOCITY) !=
         start_interfaces.end()) {
-      if (requested != AxisControlMode::IDLE && requested != AxisControlMode::VELOCITY) {
-        RCLCPP_ERROR(
-            rclcpp::get_logger("OdriveS1CanSystem"),
-            "Invalid mode switch: conflicting interfaces for joint %s", axis_configs_[i].joint_name.c_str());
-        return return_type::ERROR;
-      }
       requested = AxisControlMode::VELOCITY;
     }
     if (std::find(start_interfaces.begin(), start_interfaces.end(), base + hardware_interface::HW_IF_EFFORT) !=
         start_interfaces.end()) {
-      if (requested != AxisControlMode::IDLE && requested != AxisControlMode::EFFORT) {
-        RCLCPP_ERROR(
-            rclcpp::get_logger("OdriveS1CanSystem"),
-            "Invalid mode switch: conflicting interfaces for joint %s", axis_configs_[i].joint_name.c_str());
-        return return_type::ERROR;
-      }
       requested = AxisControlMode::EFFORT;
     }
 
     if (mode != AxisControlMode::IDLE && requested != mode && requested != AxisControlMode::IDLE) {
-      RCLCPP_ERROR(
-          rclcpp::get_logger("OdriveS1CanSystem"),
-          "Invalid mode switch: joint %s already in a different mode",
-          axis_configs_[i].joint_name.c_str());
-      return return_type::ERROR;
+      const std::string active_iface = base + interface_for_mode(mode);
+      if (std::find(stop_interfaces.begin(), stop_interfaces.end(), active_iface) == stop_interfaces.end()) {
+        RCLCPP_ERROR(
+            rclcpp::get_logger("OdriveS1CanSystem"),
+            "Invalid mode switch: joint %s already in a different mode",
+            axis_configs_[i].joint_name.c_str());
+        return return_type::ERROR;
+      }
     }
   }
 
@@ -823,6 +837,7 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
     const std::vector<std::string> &stop_interfaces) {
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
     bool mode_changed = false;
+    AxisControlMode previous_mode = command_modes_[i];
     const std::string base = axis_configs_[i].joint_name + "/";
     bool requested_idle = false;
     if (std::find(stop_interfaces.begin(), stop_interfaces.end(), base + hardware_interface::HW_IF_POSITION) !=
@@ -831,7 +846,6 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
         command_modes_[i] = AxisControlMode::IDLE;
         mode_changed = true;
         requested_idle = true;
-        runtime_metadata_[i].awaiting_idle = true;
       }
     }
     if (std::find(stop_interfaces.begin(), stop_interfaces.end(), base + hardware_interface::HW_IF_VELOCITY) !=
@@ -840,7 +854,6 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
         command_modes_[i] = AxisControlMode::IDLE;
         mode_changed = true;
         requested_idle = true;
-        runtime_metadata_[i].awaiting_idle = true;
       }
     }
     if (std::find(stop_interfaces.begin(), stop_interfaces.end(), base + hardware_interface::HW_IF_EFFORT) !=
@@ -849,7 +862,6 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
         command_modes_[i] = AxisControlMode::IDLE;
         mode_changed = true;
         requested_idle = true;
-        runtime_metadata_[i].awaiting_idle = true;
       }
     }
 
@@ -857,28 +869,27 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
         start_interfaces.end()) {
       command_modes_[i] = AxisControlMode::POSITION;
       mode_changed = true;
-      runtime_metadata_[i].awaiting_closed_loop = true;
     }
     if (std::find(start_interfaces.begin(), start_interfaces.end(), base + hardware_interface::HW_IF_VELOCITY) !=
         start_interfaces.end()) {
       command_modes_[i] = AxisControlMode::VELOCITY;
       mode_changed = true;
-      runtime_metadata_[i].awaiting_closed_loop = true;
     }
     if (std::find(start_interfaces.begin(), start_interfaces.end(), base + hardware_interface::HW_IF_EFFORT) !=
         start_interfaces.end()) {
       command_modes_[i] = AxisControlMode::EFFORT;
       mode_changed = true;
-      runtime_metadata_[i].awaiting_closed_loop = true;
     }
 
     if (mode_changed) {
       runtime_metadata_[i].sent_closed_loop = false;
-      runtime_metadata_[i].pending_idle_request = requested_idle;
+      const bool request_idle = requested_idle && command_modes_[i] == AxisControlMode::IDLE;
+      runtime_metadata_[i].pending_idle_request = request_idle;
+      runtime_metadata_[i].awaiting_idle = request_idle;
       runtime_metadata_[i].pending_control_mode.reset();
       auto mode = command_modes_[i];
       if (mode == AxisControlMode::IDLE || mode == AxisControlMode::HOMING) {
-        runtime_metadata_[i].sent_closed_loop = false;
+        runtime_metadata_[i].awaiting_closed_loop = false;
         continue;
       }
       uint8_t ctrl_mode = CONTROL_MODE_POSITION_CONTROL;
@@ -891,7 +902,11 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
         default: break;
       }
       runtime_metadata_[i].pending_control_mode = ctrl_mode;
-      runtime_metadata_[i].awaiting_closed_loop = true;
+      const bool switching_active_mode =
+          (previous_mode != AxisControlMode::IDLE && previous_mode != AxisControlMode::HOMING &&
+           mode != AxisControlMode::IDLE && mode != previous_mode);
+      runtime_metadata_[i].awaiting_closed_loop =
+          switching_active_mode || axis_states_[i].axis_state != AXIS_STATE_CLOSED_LOOP_CONTROL;
     }
   }
 
@@ -923,7 +938,21 @@ return_type OdriveS1CanSystem::read(const rclcpp::Time &stamp, const rclcpp::Dur
 
 return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Duration &) {
   if (!transport_) return return_type::ERROR;
-  if (!active_) return return_type::OK;
+  if (!active_) {
+    // Allow homing requests even when inactive so controllers can trigger a homing sequence before activation.
+    for (size_t i = 0; i < axis_configs_.size(); ++i) {
+      const double cmd_home = axis_commands_[i].homing;
+      if (cmd_home > 0.5 && !runtime_metadata_[i].homing_requested) {
+        if (send_axis_state(i, AXIS_STATE_HOMING)) {
+          runtime_metadata_[i].homing_requested = true;
+          runtime_metadata_[i].last_homing_result = "requested";
+          command_modes_[i] = AxisControlMode::HOMING;
+          axis_states_[i].homing_status = 1.0;
+        }
+      }
+    }
+    return return_type::OK;
+  }
 
   util_metrics_.frames_this_cycle = 0;
   util_metrics_.budget_exceeded_last_cycle = false;
@@ -951,8 +980,10 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
       continue;
     }
     if (runtime_metadata_[i].pending_control_mode) {
-      send_control_mode(i, *runtime_metadata_[i].pending_control_mode, command_modes_[i] != AxisControlMode::IDLE);
-      runtime_metadata_[i].pending_control_mode.reset();
+      if (!runtime_metadata_[i].awaiting_closed_loop) {
+        send_control_mode(i, *runtime_metadata_[i].pending_control_mode, command_modes_[i] != AxisControlMode::IDLE);
+        runtime_metadata_[i].pending_control_mode.reset();
+      }
     }
 
     // Homing is edge-triggered: >0 triggers a homing request for that axis.
@@ -971,14 +1002,16 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
     // Send commands based on the active control mode.
     // We only send commands if the value has changed significantly or if we haven't sent a closed-loop command yet.
     // Do not stream commands until the drive confirms CLOSED_LOOP via heartbeat.
-    if (command_modes_[i] != AxisControlMode::IDLE && command_modes_[i] != AxisControlMode::HOMING) {
-      if (runtime_metadata_[i].awaiting_closed_loop || axis_states_[i].axis_state != AXIS_STATE_CLOSED_LOOP_CONTROL) {
-        runtime_metadata_[i].awaiting_closed_loop = true;
+  if (command_modes_[i] != AxisControlMode::IDLE && command_modes_[i] != AxisControlMode::HOMING) {
+    if (runtime_metadata_[i].awaiting_closed_loop || axis_states_[i].axis_state != AXIS_STATE_CLOSED_LOOP_CONTROL) {
+      runtime_metadata_[i].awaiting_closed_loop = true;
+      if (!runtime_metadata_[i].pending_control_mode) {
         send_axis_state(i, AXIS_STATE_CLOSED_LOOP_CONTROL);
-        continue;
       }
-      runtime_metadata_[i].awaiting_closed_loop = false;
+      continue;
     }
+    runtime_metadata_[i].awaiting_closed_loop = false;
+  }
 
     switch (command_modes_[i]) {
       case AxisControlMode::POSITION: {
@@ -1066,7 +1099,8 @@ void OdriveS1CanSystem::handle_frame(const can_frame &frame, const rclcpp::Time 
         axis_states_[idx].disarm_reason = msg.Disarm_Reason;
         axis_states_[idx].axis_error = msg.Active_Errors;
         if (msg.Active_Errors != 0 || msg.Disarm_Reason != 0) {
-          latch_fault(idx, msg.Active_Errors);
+          runtime_metadata_[idx].requires_rearm = node_status_.require_rearm_after_fault;
+          latch_fault(idx, msg.Active_Errors | msg.Disarm_Reason);
         } else if (!runtime_metadata_[idx].requires_rearm) {
           axis_states_[idx].health = AxisHealth::OK;
           update_fault_detail(idx);
@@ -1107,7 +1141,7 @@ void OdriveS1CanSystem::process_heartbeat(size_t idx, const Heartbeat_msg_t &msg
   if (msg.Axis_State == AXIS_STATE_IDLE) {
     runtime_metadata_[idx].awaiting_idle = false;
   }
-  if (prev_state == AXIS_STATE_HOMING) {
+  if (prev_state == AXIS_STATE_HOMING || runtime_metadata_[idx].homing_requested) {
     if (msg.Axis_Error != 0) {
       runtime_metadata_[idx].last_homing_result = "failed";
       runtime_metadata_[idx].homing_requested = false;
@@ -1165,9 +1199,17 @@ void OdriveS1CanSystem::process_sdo_response(const can_frame &frame, const rclcp
 
 void OdriveS1CanSystem::update_health(size_t idx, const rclcpp::Time &now, bool heartbeat_refresh) {
   (void)heartbeat_refresh;
-  double age = (now - axis_states_[idx].last_heartbeat).seconds();
-  if (age < 0.0 || axis_states_[idx].last_heartbeat.nanoseconds() == 0) {
-    age = node_status_.heartbeat_timeout_sec + 1.0;
+  double age = node_status_.heartbeat_timeout_sec + 1.0;
+  if (axis_states_[idx].last_heartbeat.nanoseconds() != 0 &&
+      axis_states_[idx].last_heartbeat.get_clock_type() == now.get_clock_type()) {
+    try {
+      age = (now - axis_states_[idx].last_heartbeat).seconds();
+      if (age < 0.0) {
+        age = node_status_.heartbeat_timeout_sec + 1.0;
+      }
+    } catch (...) {
+      age = node_status_.heartbeat_timeout_sec + 1.0;
+    }
   }
   if (runtime_metadata_[idx].requires_rearm) {
     axis_states_[idx].health = AxisHealth::ERROR;
@@ -1210,132 +1252,98 @@ void OdriveS1CanSystem::update_fault_detail(size_t idx) {
 
 double OdriveS1CanSystem::actuator_to_joint_pos(size_t idx, double turns) {
   const auto &cfg = axis_configs_[idx];
-  // Use transmission mapping when available to honor reduction semantics.
+  double ratio = cfg.gear_ratio.value_or(1.0);
+  double joint_offset = cfg.joint_offset.value_or(0.0);
   if (idx < transmissions_.size() && transmissions_[idx] && transmissions_[idx]->valid()) {
-    auto &tx = *transmissions_[idx];
-    tx.actuator_pos = turns * kRadPerTurn;
-    tx.transmission->actuator_to_joint_state(tx.actuator_data, tx.joint_data);
-    double joint = tx.joint_pos;
-    if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
-      joint = (tx.joint_pos / kRadPerTurn) * (*cfg.lead_screw_pitch);
-    }
-    return joint;
+    ratio = transmissions_[idx]->reduction;
+    joint_offset = transmissions_[idx]->joint_offset;
   }
+  if (ratio == 0.0) return 0.0;
 
   if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
-    return turns * (*cfg.lead_screw_pitch);
+    return (turns / ratio) * (*cfg.lead_screw_pitch) + joint_offset;
   }
-  const double ratio = cfg.gear_ratio.value_or(1.0);
-  return (turns * kRadPerTurn) / ratio;
+  return (turns * kRadPerTurn) / ratio + joint_offset;
 }
 
 double OdriveS1CanSystem::joint_to_actuator_pos(size_t idx, double joint_pos) {
   const auto &cfg = axis_configs_[idx];
+  double ratio = cfg.gear_ratio.value_or(1.0);
+  double joint_offset = cfg.joint_offset.value_or(0.0);
   if (idx < transmissions_.size() && transmissions_[idx] && transmissions_[idx]->valid()) {
-    auto &tx = *transmissions_[idx];
-    tx.joint_pos = joint_pos;
-    if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
-      const double pitch = *cfg.lead_screw_pitch;
-      if (pitch == 0.0) return 0.0;
-      tx.joint_pos = (joint_pos / pitch) * kRadPerTurn;
-    }
-    tx.transmission->joint_to_actuator_state(tx.joint_data, tx.actuator_data);
-    return tx.actuator_pos / kRadPerTurn;
+    ratio = transmissions_[idx]->reduction;
+    joint_offset = transmissions_[idx]->joint_offset;
   }
+  if (ratio == 0.0) return 0.0;
 
   if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
     const double pitch = *cfg.lead_screw_pitch;
     if (pitch == 0.0) return 0.0;
-    return joint_pos / pitch;
+    return ((joint_pos - joint_offset) / pitch) * ratio;
   }
-  const double ratio = cfg.gear_ratio.value_or(1.0);
-  if (ratio == 0.0) return 0.0;
-  return (joint_pos * ratio) / kRadPerTurn;
+  return ((joint_pos - joint_offset) * ratio) / kRadPerTurn;
 }
 
 double OdriveS1CanSystem::actuator_vel_to_joint(size_t idx, double turns_per_sec) {
   const auto &cfg = axis_configs_[idx];
+  double ratio = cfg.gear_ratio.value_or(1.0);
   if (idx < transmissions_.size() && transmissions_[idx] && transmissions_[idx]->valid()) {
-    auto &tx = *transmissions_[idx];
-    tx.actuator_vel = turns_per_sec * kRadPerTurn;
-    tx.transmission->actuator_to_joint_state(tx.actuator_data, tx.joint_data);
-    double joint = tx.joint_vel;
-    if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
-      joint = (tx.joint_vel / kRadPerTurn) * (*cfg.lead_screw_pitch);
-    }
-    return joint;
+    ratio = transmissions_[idx]->reduction;
   }
+  if (ratio == 0.0) return 0.0;
 
   if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
-    return turns_per_sec * (*cfg.lead_screw_pitch);
+    return (turns_per_sec / ratio) * (*cfg.lead_screw_pitch);
   }
-  const double ratio = cfg.gear_ratio.value_or(1.0);
   return (turns_per_sec * kRadPerTurn) / ratio;
 }
 
 double OdriveS1CanSystem::joint_vel_to_actuator(size_t idx, double joint_vel) {
   const auto &cfg = axis_configs_[idx];
+  double ratio = cfg.gear_ratio.value_or(1.0);
   if (idx < transmissions_.size() && transmissions_[idx] && transmissions_[idx]->valid()) {
-    auto &tx = *transmissions_[idx];
-    tx.joint_vel = joint_vel;
-    if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
-      const double pitch = *cfg.lead_screw_pitch;
-      if (pitch == 0.0) return 0.0;
-      tx.joint_vel = (joint_vel / pitch) * kRadPerTurn;
-    }
-    tx.transmission->joint_to_actuator_state(tx.joint_data, tx.actuator_data);
-    return tx.actuator_vel / kRadPerTurn;
+    ratio = transmissions_[idx]->reduction;
   }
+  if (ratio == 0.0) return 0.0;
 
   if (cfg.joint_type == "prismatic" && cfg.lead_screw_pitch) {
     const double pitch = *cfg.lead_screw_pitch;
     if (pitch == 0.0) return 0.0;
-    return joint_vel / pitch;
+    return (joint_vel / pitch) * ratio;
   }
-  const double ratio = cfg.gear_ratio.value_or(1.0);
-  if (ratio == 0.0) return 0.0;
   return (joint_vel * ratio) / kRadPerTurn;
 }
 
 double OdriveS1CanSystem::actuator_effort_to_joint(size_t idx, double torque) {
   const auto &cfg = axis_configs_[idx];
+  double ratio = cfg.gear_ratio.value_or(1.0);
   if (idx < transmissions_.size() && transmissions_[idx] && transmissions_[idx]->valid()) {
-    auto &tx = *transmissions_[idx];
-    tx.actuator_effort = torque;
-    tx.transmission->actuator_to_joint_state(tx.actuator_data, tx.joint_data);
-    double joint_torque = tx.joint_effort;
-    if (cfg.torque_constant) {
-      joint_torque *= *cfg.torque_constant;
-    }
-    return joint_torque;
+    ratio = transmissions_[idx]->reduction;
   }
+  if (ratio == 0.0) return 0.0;
 
+  double joint_torque = torque * ratio;
   if (cfg.torque_constant) {
-    return torque * (*cfg.torque_constant);
+    joint_torque *= *cfg.torque_constant;
   }
-  return torque;
+  return joint_torque;
 }
 
 double OdriveS1CanSystem::joint_effort_to_actuator(size_t idx, double effort) {
   const auto &cfg = axis_configs_[idx];
+  double ratio = cfg.gear_ratio.value_or(1.0);
   if (idx < transmissions_.size() && transmissions_[idx] && transmissions_[idx]->valid()) {
-    auto &tx = *transmissions_[idx];
-    tx.joint_effort = effort;
-    if (cfg.torque_constant) {
-      const double k = *cfg.torque_constant;
-      if (k == 0.0) return 0.0;
-      tx.joint_effort = effort / k;
-    }
-    tx.transmission->joint_to_actuator_state(tx.joint_data, tx.actuator_data);
-    return tx.actuator_effort;
+    ratio = transmissions_[idx]->reduction;
   }
+  if (ratio == 0.0) return 0.0;
 
+  double actuator_effort = effort / ratio;
   if (cfg.torque_constant) {
     const double k = *cfg.torque_constant;
     if (k == 0.0) return 0.0;
-    return effort / k;
+    actuator_effort = (effort / k) / ratio;
   }
-  return effort;
+  return actuator_effort;
 }
 
 AxisPowerState OdriveS1CanSystem::derive_power_state(const AxisState &state) const {
@@ -1385,7 +1393,7 @@ bool OdriveS1CanSystem::send_control_mode(size_t idx, uint8_t control_mode, bool
   ctrl.encode_buf(frame.data);
 
   bool ok = send_frame(frame, true, now_for_io());
-  if (require_closed_loop) {
+  if (require_closed_loop && axis_states_[idx].axis_state != AXIS_STATE_CLOSED_LOOP_CONTROL) {
     ok &= send_axis_state(idx, AXIS_STATE_CLOSED_LOOP_CONTROL);
   }
   runtime_metadata_[idx].sent_closed_loop = require_closed_loop;
@@ -1514,6 +1522,7 @@ bool OdriveS1CanSystem::send_clear_errors(size_t idx) {
 void OdriveS1CanSystem::latch_fault(size_t idx, uint32_t axis_error) {
   auto &state = axis_states_[idx];
   auto &meta = runtime_metadata_[idx];
+  meta.mode_before_fault = command_modes_[idx];
   state.axis_error = axis_error;
   state.health = AxisHealth::ERROR;
   state.health_numeric = static_cast<double>(health_to_int(state.health));
@@ -1548,6 +1557,7 @@ bool OdriveS1CanSystem::clear_errors_and_rearm(size_t idx) {
   meta.idle_sent_on_fault = false;
   meta.sent_closed_loop = false;
   meta.homing_requested = false;
+  command_modes_[idx] = meta.mode_before_fault;
 
   bool ok = send_clear_errors(idx);
   ok &= send_axis_state(idx, AXIS_STATE_CLOSED_LOOP_CONTROL);
@@ -1556,6 +1566,15 @@ bool OdriveS1CanSystem::clear_errors_and_rearm(size_t idx) {
   state.power_state_numeric = static_cast<double>(power_state_to_int(derive_power_state(state)));
   state.fault_code = 0.0;
   meta.sent_closed_loop = true;
+  // Re-issue control mode after clearing faults if a non-idle mode was active.
+  if (command_modes_[idx] == AxisControlMode::POSITION || command_modes_[idx] == AxisControlMode::VELOCITY ||
+      command_modes_[idx] == AxisControlMode::EFFORT) {
+    uint8_t ctrl_mode = CONTROL_MODE_POSITION_CONTROL;
+    if (command_modes_[idx] == AxisControlMode::VELOCITY) ctrl_mode = CONTROL_MODE_VELOCITY_CONTROL;
+    if (command_modes_[idx] == AxisControlMode::EFFORT) ctrl_mode = CONTROL_MODE_TORQUE_CONTROL;
+    meta.pending_control_mode = ctrl_mode;
+    meta.awaiting_closed_loop = true;
+  }
   return ok;
 }
 
@@ -1653,19 +1672,26 @@ bool OdriveS1CanSystem::run_limit_check(size_t idx) {
   }
 
   // Compare URDF-implied limits against values reported over CAN.
+  auto mismatch = [&](double expected_actuator, double odrive_actuator, double tol) {
+    if (node_status_.limits_check_use_sdo &&
+        node_status_.limit_check_config.mode == LimitCheckConfig::Mode::WARN_ONLY) {
+      return (odrive_actuator + tol) < expected_actuator;
+    }
+    return std::fabs(expected_actuator - odrive_actuator) > tol;
+  };
   if (cfg.limit_velocity && meta.odrive_velocity_limit) {
     const double expected = joint_vel_to_actuator(idx, *cfg.limit_velocity);
     const double tol = std::fabs(expected) * node_status_.limit_check_config.velocity_tolerance_ratio;
-    if (*meta.odrive_velocity_limit + tol < expected) {
+    if (mismatch(expected, *meta.odrive_velocity_limit, tol)) {
       ok = false;
       detail << "vel_mismatch expected_actuator=" << expected << " odrive=" << *meta.odrive_velocity_limit
              << " tol=" << tol << ";";
     }
   }
   if (cfg.limit_effort && meta.odrive_effort_limit) {
-    const double expected = joint_effort_to_actuator(cfg, *cfg.limit_effort);
+    const double expected = joint_effort_to_actuator(idx, *cfg.limit_effort);
     const double tol = std::fabs(expected) * node_status_.limit_check_config.effort_tolerance_ratio;
-    if (*meta.odrive_effort_limit + tol < expected) {
+    if (mismatch(expected, *meta.odrive_effort_limit, tol)) {
       ok = false;
       detail << "effort_mismatch expected_actuator=" << expected << " odrive=" << *meta.odrive_effort_limit
              << " tol=" << tol << ";";
@@ -1674,7 +1700,7 @@ bool OdriveS1CanSystem::run_limit_check(size_t idx) {
   if (cfg.limit_acceleration && meta.odrive_accel_limit) {
     const double exp_acc = joint_vel_to_actuator(idx, *cfg.limit_acceleration);
     const double tol = std::fabs(exp_acc) * node_status_.limit_check_config.acceleration_tolerance_ratio;
-    if (*meta.odrive_accel_limit + tol < exp_acc) {
+    if (mismatch(exp_acc, *meta.odrive_accel_limit, tol)) {
       ok = false;
       detail << "accel_mismatch expected_actuator=" << exp_acc << " odrive=" << *meta.odrive_accel_limit
              << " tol=" << tol << ";";
@@ -1693,9 +1719,7 @@ bool OdriveS1CanSystem::run_limit_check(size_t idx) {
     RCLCPP_WARN(
         rclcpp::get_logger("OdriveS1CanSystem"),
         "Limit mismatch for joint %s", cfg.joint_name.c_str());
-    if (axis_states_[idx].health == AxisHealth::OK) {
-      axis_states_[idx].health = AxisHealth::WARNING;
-    }
+    axis_states_[idx].health = AxisHealth::WARNING;
   } else {
     meta.limit_check_result = AxisRuntimeMetadata::LimitCheckResult::OK;
     meta.limit_check_detail.clear();
@@ -1706,19 +1730,16 @@ bool OdriveS1CanSystem::run_limit_check(size_t idx) {
 void OdriveS1CanSystem::publish_status_if_due(const rclcpp::Time &stamp) {
   const double rate = node_status_.status_publish_rate_hz;
   if (rate <= 0.0) return;
-  if (last_status_publish_time_.get_clock_type() != stamp.get_clock_type()) {
-    last_status_publish_time_ = stamp;
-  }
-  const double period = 1.0 / rate;
-  if ((stamp - last_status_publish_time_).seconds() < period) {
-    return;
-  }
   last_status_publish_time_ = stamp;
 
   for (size_t i = 0; i < axis_states_.size(); ++i) {
     auto &state = axis_states_[i];
-    const double age = (stamp - state.last_heartbeat).seconds();
-    state.heartbeat_age = age > 0.0 ? age : 0.0;
+    if (stamp.get_clock_type() == state.last_heartbeat.get_clock_type()) {
+      const double age = (stamp - state.last_heartbeat).seconds();
+      state.heartbeat_age = age > 0.0 ? age : 0.0;
+    } else {
+      state.heartbeat_age = 0.0;
+    }
     state.health_numeric = static_cast<double>(health_to_int(state.health));
     state.axis_state_report = static_cast<double>(state.axis_state);
     state.power_state_numeric = static_cast<double>(power_state_to_int(derive_power_state(state)));
