@@ -661,3 +661,11 @@ TEST(IntegrationCan, LimitCheckUsesSdoWhenEnabled) {
   EXPECT_EQ(meta.limit_check_result,
             odrive_ros2_control::OdriveS1CanSystem::AxisRuntimeMetadataForTests::LimitCheckResult::OK);
 }
+
+int main(int argc, char **argv) {
+  testing::InitGoogleTest(&argc, argv);
+  rclcpp::init(argc, argv);
+  int result = RUN_ALL_TESTS();
+  rclcpp::shutdown();
+  return result;
+}

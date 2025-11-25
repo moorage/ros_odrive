@@ -14,6 +14,7 @@
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 
 struct can_frame; // forward declaration to keep header portable
@@ -313,6 +314,8 @@ private:
   std::vector<AxisControlMode> command_modes_;
   std::vector<AxisRuntimeMetadata> runtime_metadata_;
   std::vector<uint32_t> axis_can_ids_;
+  rclcpp::Node::SharedPtr status_node_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   std::vector<std::optional<TransmissionData>> transmissions_;
   std::unordered_map<uint32_t, size_t> can_id_lookup_;
   std::unordered_map<int, size_t> node_to_primary_axis_;

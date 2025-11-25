@@ -14,6 +14,7 @@
 #include <sstream>
 #include <type_traits>
 
+#include "std_msgs/msg/string.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "socket_can.hpp"
@@ -279,6 +280,10 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   // This allows for dependency injection, which is useful for testing.
   transport_factory_ = transport_factory_override_ ? transport_factory_override_ : default_transport_factory();
   last_control_time_ = rclcpp::Time(0, 0, steady_clock_.get_clock_type());
+
+  // Status publisher for homing/axis state visibility.
+  status_node_ = rclcpp::Node::make_shared("odrive_s1_status");
+  status_pub_ = status_node_->create_publisher<std_msgs::msg::String>("odrive_s1_ros2_control/status", 10);
 
   auto get_param = [&](const std::string &key, const std::string &fallback, const std::string &default_val) {
     auto it = info_.hardware_parameters.find(key);
@@ -612,14 +617,17 @@ bool OdriveS1CanSystem::validate_parameters() {
           "Joint %s must expose at least one command interface (position/velocity/effort)", cfg.joint_name.c_str());
       return false;
     }
-    if (cfg.axis_index < 0 || cfg.axis_index > 1) {
+    // ODrive S1 only exposes axis0; reject any other index so CAN IDs map 1:1
+    // with configured node_id.
+    if (cfg.axis_index != 0) {
       RCLCPP_ERROR(
           rclcpp::get_logger("OdriveS1CanSystem"),
-          "Joint %s axis_index %d invalid (must be 0 or 1)", cfg.joint_name.c_str(), cfg.axis_index);
+          "Joint %s axis_index %d invalid (S1 supports only axis 0)", cfg.joint_name.c_str(), cfg.axis_index);
       return false;
     }
 
-    const uint32_t can_id = static_cast<uint32_t>(cfg.node_id * 2 + cfg.axis_index);
+    // For single-axis S1, CAN node_id doubles as axis CAN ID.
+    const uint32_t can_id = static_cast<uint32_t>(cfg.node_id);
     axis_can_ids_[idx] = can_id;
     if (can_id_lookup_.count(can_id)) {
       RCLCPP_ERROR(
@@ -1976,6 +1984,20 @@ void OdriveS1CanSystem::publish_status_if_due(const rclcpp::Time &stamp) {
     state.fault_code = static_cast<double>(fault);
   }
   populate_status_messages();
+  if (status_pub_) {
+    for (const auto &msg : hardware_status_cache_) {
+      std::string line = msg.name;
+      if (!msg.values.empty()) {
+        line.append(" ");
+        for (const auto &kv : msg.values) {
+          line.append(kv.key).append("=").append(kv.value).append(";");
+        }
+      }
+      std_msgs::msg::String out;
+      out.data = line;
+      status_pub_->publish(out);
+    }
+  }
 }
 
 uint32_t OdriveS1CanSystem::axis_can_id(size_t idx) const {

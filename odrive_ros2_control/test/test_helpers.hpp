@@ -45,8 +45,9 @@ inline hardware_interface::HardwareInfo make_info() {
   return info;
 }
 
-inline uint32_t axis_can_id(uint32_t node_id, uint32_t axis_index) {
-  return node_id * 2 + axis_index;
+// S1 exposes only axis0, so CAN ID == node_id.
+inline uint32_t axis_can_id(uint32_t node_id, uint32_t /*axis_index*/) {
+  return node_id;
 }
 
 inline uint32_t frame_axis_id(const can_frame &frame) {
