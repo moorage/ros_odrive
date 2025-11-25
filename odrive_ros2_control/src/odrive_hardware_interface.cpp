@@ -1019,17 +1019,20 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
     // Allow homing requests even when inactive so controllers can trigger a homing sequence before activation.
     for (size_t i = 0; i < axis_configs_.size(); ++i) {
       const double cmd_home = axis_commands_[i].homing;
-      if (cmd_home > 0.5 && !runtime_metadata_[i].homing_requested) {
-      if (send_homing_request(i)) {
-        RCLCPP_INFO(
-            logger,
-            "Axis %s (node %u) homing requested while controller inactive",
-            axis_configs_[i].joint_name.c_str(), axis_can_id(i));
-        runtime_metadata_[i].homing_requested = true;
-        runtime_metadata_[i].last_homing_result = "requested";
-        command_modes_[i] = AxisControlMode::HOMING;
-        axis_states_[i].homing_status = 1.0;
-      }
+      const double prev_cmd_home = runtime_metadata_[i].last_cmd_home;
+      const bool home_rising = cmd_home > 0.5 && prev_cmd_home <= 0.5;
+      runtime_metadata_[i].last_cmd_home = cmd_home;
+      if (home_rising && !runtime_metadata_[i].homing_requested) {
+        if (send_homing_request(i)) {
+          RCLCPP_INFO(
+              logger,
+              "Axis %s (node %u) homing requested while controller inactive",
+              axis_configs_[i].joint_name.c_str(), axis_can_id(i));
+          runtime_metadata_[i].homing_requested = true;
+          runtime_metadata_[i].last_homing_result = "requested";
+          command_modes_[i] = AxisControlMode::HOMING;
+          axis_states_[i].homing_status = 1.0;
+        }
       }
     }
     return return_type::OK;
@@ -1052,6 +1055,10 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
     const double cmd_vel = axis_commands_[i].velocity;
     const double cmd_eff = axis_commands_[i].effort;
     const double cmd_home = axis_commands_[i].homing;
+    // Only trigger homing on a rising edge so a stuck-high command does not loop.
+    const double prev_cmd_home = runtime_metadata_[i].last_cmd_home;
+    const bool home_rising = cmd_home > 0.5 && prev_cmd_home <= 0.5;
+    runtime_metadata_[i].last_cmd_home = cmd_home;
     const AxisControlMode mode = command_modes_[i];
 
     if (runtime_metadata_[i].pending_idle_request) {
@@ -1069,7 +1076,7 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
     }
 
     // Homing is edge-triggered: >0 triggers a homing request for that axis.
-    if (cmd_home > 0.5 && !runtime_metadata_[i].homing_requested) {
+    if (home_rising && !runtime_metadata_[i].homing_requested) {
       if (send_homing_request(i)) {
         RCLCPP_INFO(
             logger,
@@ -1252,6 +1259,8 @@ void OdriveS1CanSystem::process_heartbeat(size_t idx, const Heartbeat_msg_t &msg
 
   if (msg.Axis_State == AXIS_STATE_CLOSED_LOOP_CONTROL) {
     runtime_metadata_[idx].awaiting_closed_loop = false;
+    meta.post_homing_closed_loop_requested = false;
+    meta.logged_waiting_closed_loop = false;
   }
   if (msg.Axis_State == AXIS_STATE_IDLE) {
     runtime_metadata_[idx].awaiting_idle = false;
@@ -1284,11 +1293,34 @@ void OdriveS1CanSystem::process_heartbeat(size_t idx, const Heartbeat_msg_t &msg
       axis_commands_[idx].position = 0.0;
       axis_commands_[idx].velocity = 0.0;
       command_modes_[idx] = AxisControlMode::IDLE;
-    } else {
-      runtime_metadata_[idx].last_homing_result = "unknown";
-      axis_states_[idx].homing_status = 0.0;
-      meta.last_logged_homing_status.reset();
+    } else if (msg.Axis_State == AXIS_STATE_IDLE) {
+      runtime_metadata_[idx].last_homing_result = "success_idle";
+      runtime_metadata_[idx].homing_requested = false;
+      axis_states_[idx].homing_status = 2.0;
+      meta.last_logged_homing_status = 2;
+      RCLCPP_INFO(
+          logger,
+          "Axis %s (node %u) homing complete; drive returned to IDLE. Requesting CLOSED_LOOP_CONTROL",
+          axis_name.c_str(), node_id);
+      if (!meta.post_homing_closed_loop_requested) {
+        send_axis_state(idx, AXIS_STATE_CLOSED_LOOP_CONTROL);
+        runtime_metadata_[idx].awaiting_closed_loop = true;
+        meta.post_homing_closed_loop_requested = true;
+      }
     }
+  }
+  // If homing succeeded and we’re sitting in IDLE, proactively request CLOSED_LOOP so
+  // trajectories can start without timing out on the first command.
+  if (axis_states_[idx].homing_status == 2.0 &&
+      msg.Axis_State == AXIS_STATE_IDLE &&
+      !meta.post_homing_closed_loop_requested) {
+    RCLCPP_INFO(
+        logger,
+        "Axis %s (node %u) homing done and IDLE; requesting CLOSED_LOOP_CONTROL",
+        axis_name.c_str(), node_id);
+    send_axis_state(idx, AXIS_STATE_CLOSED_LOOP_CONTROL);
+    meta.post_homing_closed_loop_requested = true;
+    runtime_metadata_[idx].awaiting_closed_loop = true;
   }
 
   if (msg.Axis_Error != 0) {

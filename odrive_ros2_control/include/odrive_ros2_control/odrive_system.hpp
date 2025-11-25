@@ -210,6 +210,7 @@ private:
     double last_cmd_pos = 0.0;
     double last_cmd_vel = 0.0;
     double last_cmd_effort = 0.0;
+    double last_cmd_home = 0.0;
     bool sent_closed_loop = false;
     bool homing_requested = false;
     AxisControlMode mode_before_fault = AxisControlMode::IDLE;
@@ -234,6 +235,7 @@ private:
     bool pending_idle_request = false;
     std::optional<uint8_t> pending_control_mode;
     bool logged_waiting_closed_loop = false;
+    bool post_homing_closed_loop_requested = false;
   };
 
   struct TransmissionData {
