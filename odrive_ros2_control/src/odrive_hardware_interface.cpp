@@ -120,6 +120,26 @@ void add_kv(Msg &msg, const std::string &key, const std::string &value) {
   }
 }
 
+const char *axis_state_to_string(uint8_t state) {
+  switch (state) {
+    case AXIS_STATE_UNDEFINED: return "UNDEFINED";
+    case AXIS_STATE_IDLE: return "IDLE";
+    case AXIS_STATE_STARTUP_SEQUENCE: return "STARTUP_SEQUENCE";
+    case AXIS_STATE_FULL_CALIBRATION_SEQUENCE: return "FULL_CALIBRATION";
+    case AXIS_STATE_MOTOR_CALIBRATION: return "MOTOR_CALIBRATION";
+    case AXIS_STATE_ENCODER_INDEX_SEARCH: return "ENCODER_INDEX_SEARCH";
+    case AXIS_STATE_ENCODER_OFFSET_CALIBRATION: return "ENCODER_OFFSET_CALIBRATION";
+    case AXIS_STATE_CLOSED_LOOP_CONTROL: return "CLOSED_LOOP_CONTROL";
+    case AXIS_STATE_LOCKIN_SPIN: return "LOCKIN_SPIN";
+    case AXIS_STATE_ENCODER_DIR_FIND: return "ENCODER_DIR_FIND";
+    case AXIS_STATE_HOMING: return "HOMING";
+    case AXIS_STATE_ENCODER_HALL_POLARITY_CALIBRATION: return "ENCODER_HALL_POLARITY_CALIBRATION";
+    case AXIS_STATE_ENCODER_HALL_PHASE_CALIBRATION: return "ENCODER_HALL_PHASE_CALIBRATION";
+    case AXIS_STATE_ANTICOGGING_CALIBRATION: return "ANTICOGGING_CALIBRATION";
+    default: return "UNKNOWN";
+  }
+}
+
 } // namespace
 
 thread_local CanTransportFactory OdriveS1CanSystem::transport_factory_override_;
@@ -324,6 +344,7 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   if (!can_util_limit) return CallbackReturn::ERROR;
   node_status_.can_utilization_limit = *can_util_limit;
   node_status_.default_mode = get_param("default_mode", "", "idle");
+  node_status_.homing_use_sdo = to_bool(get_param("homing.use_sdo", "", "false"), false);
   auto can_bitrate = parse_uint32(get_param("can_bitrate", "", "1000000"), "can_bitrate");
   if (!can_bitrate) return CallbackReturn::ERROR;
   node_status_.can_bitrate = *can_bitrate;
@@ -332,6 +353,7 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   node_status_.debug_log_setpoints = to_bool(get_param("debug_log_setpoints", "", "false"), false);
   node_status_.strict_bitrate = to_bool(get_param("can_bitrate_strict", "", "true"), true);
   node_status_.skip_can_validation = to_bool(get_param("skip_can_validation", "", "false"), false);
+  node_status_.log_axis_config = to_bool(get_param("log_axis_config", "", "false"), false);
   auto max_frames_per_cycle = parse_int(get_param("max_frames_per_cycle", "", "0"), "max_frames_per_cycle");
   if (!max_frames_per_cycle) return CallbackReturn::ERROR;
   node_status_.max_frames_per_cycle = *max_frames_per_cycle;
@@ -342,7 +364,11 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   if (!write_latency_warn) return CallbackReturn::ERROR;
   node_status_.write_latency_warn_sec = *write_latency_warn;
   node_status_.limits_check_use_sdo = to_bool(get_param("limits_check.use_sdo", "", "false"), false);
-  node_status_.flat_endpoints_path = get_param("limits_check.flat_endpoints_path", "", "");
+  // Accept both a generic flat_endpoints_path and the limits_check-scoped parameter for backward compatibility.
+  node_status_.flat_endpoints_path = get_param("flat_endpoints_path", "", "");
+  if (node_status_.flat_endpoints_path.empty()) {
+    node_status_.flat_endpoints_path = get_param("limits_check.flat_endpoints_path", "", "");
+  }
   auto sdo_timeout = parse_double(get_param("limits_check.sdo_timeout_sec", "", "0.5"), "limits_check.sdo_timeout_sec");
   if (!sdo_timeout) return CallbackReturn::ERROR;
   node_status_.sdo_timeout_sec = *sdo_timeout;
@@ -381,6 +407,10 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
     AxisConfig cfg;
     cfg.joint_name = joint.name;
     cfg.joint_type = joint.type;
+    auto jt_param = joint.parameters.find("joint_type");
+    if (jt_param != joint.parameters.end()) {
+      cfg.joint_type = jt_param->second;
+    }
 
     auto get_joint_param = [&](const std::string &key, const std::string &fallback) -> std::optional<double> {
       auto it = joint.parameters.find(key);
@@ -466,6 +496,37 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
       msg.values[2].key = "health_detail";
       msg.values[3].key = "heartbeat_age";
       msg.values[4].key = "homing_status";
+    }
+  }
+
+  if (node_status_.log_axis_config) {
+    for (size_t idx = 0; idx < axis_configs_.size(); ++idx) {
+      const auto &cfg = axis_configs_[idx];
+      const auto &joint = info_.joints[idx];
+      auto join_ifaces = [](const auto &ifaces) {
+        std::ostringstream ss;
+        for (size_t i = 0; i < ifaces.size(); ++i) {
+          if (i > 0) ss << ",";
+          ss << ifaces[i].name;
+        }
+        return ss.str();
+      };
+      const std::string gear = cfg.gear_ratio ? std::to_string(*cfg.gear_ratio) : "n/a";
+      const std::string pitch = cfg.lead_screw_pitch ? std::to_string(*cfg.lead_screw_pitch) : "n/a";
+      RCLCPP_INFO(
+          logger,
+          "Axis %zu: joint=%s type=%s node_id=%d axis_index=%d has_tx=%s gear_ratio=%s lead_screw_pitch=%s "
+          "cmd_ifaces=[%s] state_ifaces=[%s]",
+          idx,
+          cfg.joint_name.c_str(),
+          cfg.joint_type.c_str(),
+          cfg.node_id,
+          cfg.axis_index,
+          cfg.has_transmission ? "true" : "false",
+          gear.c_str(),
+          pitch.c_str(),
+          join_ifaces(joint.command_interfaces).c_str(),
+          join_ifaces(joint.state_interfaces).c_str());
     }
   }
 
@@ -626,7 +687,8 @@ CallbackReturn OdriveS1CanSystem::on_configure(const rclcpp_lifecycle::State &) 
     }
   }
 
-  if (node_status_.limits_check_use_sdo && !node_status_.flat_endpoints_path.empty()) {
+  if ((node_status_.limits_check_use_sdo || node_status_.homing_use_sdo) &&
+      !node_status_.flat_endpoints_path.empty()) {
     load_flat_endpoints();
   }
 
@@ -944,17 +1006,22 @@ return_type OdriveS1CanSystem::read(const rclcpp::Time &stamp, const rclcpp::Dur
 
 return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Duration &) {
   if (!transport_) return return_type::ERROR;
+  auto logger = rclcpp::get_logger("OdriveS1CanSystem");
   if (!active_) {
     // Allow homing requests even when inactive so controllers can trigger a homing sequence before activation.
     for (size_t i = 0; i < axis_configs_.size(); ++i) {
       const double cmd_home = axis_commands_[i].homing;
       if (cmd_home > 0.5 && !runtime_metadata_[i].homing_requested) {
-        if (send_axis_state(i, AXIS_STATE_HOMING)) {
-          runtime_metadata_[i].homing_requested = true;
-          runtime_metadata_[i].last_homing_result = "requested";
-          command_modes_[i] = AxisControlMode::HOMING;
-          axis_states_[i].homing_status = 1.0;
-        }
+      if (send_homing_request(i)) {
+        RCLCPP_INFO(
+            logger,
+            "Axis %s (node %u) homing requested while controller inactive",
+            axis_configs_[i].joint_name.c_str(), axis_can_id(i));
+        runtime_metadata_[i].homing_requested = true;
+        runtime_metadata_[i].last_homing_result = "requested";
+        command_modes_[i] = AxisControlMode::HOMING;
+        axis_states_[i].homing_status = 1.0;
+      }
       }
     }
     return return_type::OK;
@@ -995,7 +1062,11 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
 
     // Homing is edge-triggered: >0 triggers a homing request for that axis.
     if (cmd_home > 0.5 && !runtime_metadata_[i].homing_requested) {
-      if (send_axis_state(i, AXIS_STATE_HOMING)) {
+      if (send_homing_request(i)) {
+        RCLCPP_INFO(
+            logger,
+            "Axis %s (node %u) homing requested",
+            axis_configs_[i].joint_name.c_str(), axis_can_id(i));
         runtime_metadata_[i].homing_requested = true;
         runtime_metadata_[i].last_homing_result = "requested";
         command_modes_[i] = AxisControlMode::HOMING;
@@ -1016,9 +1087,19 @@ return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Du
         if (!runtime_metadata_[i].pending_control_mode) {
           send_axis_state(i, AXIS_STATE_CLOSED_LOOP_CONTROL);
         }
+        if (!runtime_metadata_[i].logged_waiting_closed_loop) {
+          RCLCPP_WARN(
+              logger,
+              "Axis %s (node %u) awaiting CLOSED_LOOP_CONTROL (current state=%s); holding commands",
+              axis_configs_[i].joint_name.c_str(),
+              axis_can_id(i),
+              axis_state_to_string(axis_states_[i].axis_state));
+          runtime_metadata_[i].logged_waiting_closed_loop = true;
+        }
         continue;
       }
       runtime_metadata_[i].awaiting_closed_loop = false;
+      runtime_metadata_[i].logged_waiting_closed_loop = false;
     }
 
     switch (mode) {
@@ -1140,12 +1221,27 @@ void OdriveS1CanSystem::handle_frame(const can_frame &frame, const rclcpp::Time 
 
 void OdriveS1CanSystem::process_heartbeat(size_t idx, const Heartbeat_msg_t &msg, const rclcpp::Time &stamp) {
   const uint8_t prev_state = axis_states_[idx].axis_state;
+  auto &meta = runtime_metadata_[idx];
+  const auto &axis_name = axis_configs_[idx].joint_name;
+  const uint32_t node_id = axis_can_id(idx);
+  auto logger = rclcpp::get_logger("OdriveS1CanSystem");
+
   axis_states_[idx].axis_error = msg.Axis_Error;
   axis_states_[idx].axis_state = msg.Axis_State;
   axis_states_[idx].last_heartbeat = stamp;
-  runtime_metadata_[idx].sent_closed_loop = runtime_metadata_[idx].sent_closed_loop ||
-      (msg.Axis_State == AXIS_STATE_CLOSED_LOOP_CONTROL);
+  runtime_metadata_[idx].sent_closed_loop =
+      runtime_metadata_[idx].sent_closed_loop || (msg.Axis_State == AXIS_STATE_CLOSED_LOOP_CONTROL);
   runtime_metadata_[idx].last_axis_state = msg.Axis_State;
+
+  if (!meta.last_logged_axis_state || *meta.last_logged_axis_state != msg.Axis_State || prev_state != msg.Axis_State) {
+    RCLCPP_INFO(
+        logger,
+        "Axis %s (node %u) state change: %s -> %s (axis_error=0x%x, disarm=0x%x)",
+        axis_name.c_str(), node_id, axis_state_to_string(prev_state), axis_state_to_string(msg.Axis_State),
+        msg.Axis_Error, axis_states_[idx].disarm_reason);
+    meta.last_logged_axis_state = msg.Axis_State;
+  }
+
   if (msg.Axis_State == AXIS_STATE_CLOSED_LOOP_CONTROL) {
     runtime_metadata_[idx].awaiting_closed_loop = false;
   }
@@ -1157,11 +1253,22 @@ void OdriveS1CanSystem::process_heartbeat(size_t idx, const Heartbeat_msg_t &msg
       runtime_metadata_[idx].last_homing_result = "failed";
       runtime_metadata_[idx].homing_requested = false;
       axis_states_[idx].homing_status = 3.0;
+      meta.last_logged_homing_status = 3;
+      RCLCPP_WARN(
+          logger,
+          "Axis %s (node %u) homing failed with axis_error=0x%x disarm=0x%x state=%s",
+          axis_name.c_str(), node_id, msg.Axis_Error, axis_states_[idx].disarm_reason,
+          axis_state_to_string(msg.Axis_State));
       latch_fault(idx, msg.Axis_Error);
     } else if (msg.Axis_State == AXIS_STATE_CLOSED_LOOP_CONTROL) {
       runtime_metadata_[idx].last_homing_result = "success";
       runtime_metadata_[idx].homing_requested = false;
       axis_states_[idx].homing_status = 2.0;
+      meta.last_logged_homing_status = 2;
+      RCLCPP_INFO(
+          logger,
+          "Axis %s (node %u) homing complete; entering CLOSED_LOOP_CONTROL",
+          axis_name.c_str(), node_id);
       axis_states_[idx].pos_actuator = 0.0;
       axis_states_[idx].vel_actuator = 0.0;
       axis_states_[idx].pos_joint = 0.0;
@@ -1172,6 +1279,7 @@ void OdriveS1CanSystem::process_heartbeat(size_t idx, const Heartbeat_msg_t &msg
     } else {
       runtime_metadata_[idx].last_homing_result = "unknown";
       axis_states_[idx].homing_status = 0.0;
+      meta.last_logged_homing_status.reset();
     }
   }
 
@@ -1182,6 +1290,27 @@ void OdriveS1CanSystem::process_heartbeat(size_t idx, const Heartbeat_msg_t &msg
   } else {
     axis_states_[idx].health = AxisHealth::ERROR;
   }
+
+  const uint32_t combined_faults = axis_states_[idx].axis_error | axis_states_[idx].motor_error |
+      axis_states_[idx].controller_error | axis_states_[idx].encoder_error | axis_states_[idx].disarm_reason;
+  if (combined_faults != 0) {
+    if (!meta.last_logged_fault || *meta.last_logged_fault != combined_faults) {
+      RCLCPP_WARN(
+          logger,
+          "Axis %s (node %u) fault/disarm detected axis=0x%x motor=0x%x controller=0x%x encoder=0x%x disarm=0x%x state=%s",
+          axis_name.c_str(), node_id, axis_states_[idx].axis_error, axis_states_[idx].motor_error,
+          axis_states_[idx].controller_error, axis_states_[idx].encoder_error, axis_states_[idx].disarm_reason,
+          axis_state_to_string(axis_states_[idx].axis_state));
+      meta.last_logged_fault = combined_faults;
+    }
+  } else if (meta.last_logged_fault) {
+    RCLCPP_INFO(
+        logger,
+        "Axis %s (node %u) cleared faults; state=%s",
+        axis_name.c_str(), node_id, axis_state_to_string(axis_states_[idx].axis_state));
+    meta.last_logged_fault.reset();
+  }
+
   axis_states_[idx].heartbeat_stale = false;
 }
 
@@ -1392,6 +1521,22 @@ bool OdriveS1CanSystem::send_axis_state(size_t idx, uint32_t requested_state) {
   frame.can_dlc = msg.msg_length;
   msg.encode_buf(frame.data);
   return send_frame(frame, true, now_for_io());
+}
+
+bool OdriveS1CanSystem::send_homing_request(size_t idx) {
+  if (node_status_.homing_use_sdo && !node_status_.flat_endpoints_path.empty()) {
+    if (auto ep = endpoint_for_axis(axis_configs_[idx].axis_index, "requested_state")) {
+      const bool ok = write_endpoint_via_sdo(axis_configs_[idx].node_id, *ep, AXIS_STATE_HOMING);
+      if (!ok) {
+        RCLCPP_WARN(
+            rclcpp::get_logger("OdriveS1CanSystem"),
+            "Failed to send homing request via SDO for joint %s (node %d)",
+            axis_configs_[idx].joint_name.c_str(), axis_configs_[idx].node_id);
+      }
+      return ok;
+    }
+  }
+  return send_axis_state(idx, AXIS_STATE_HOMING);
 }
 
 bool OdriveS1CanSystem::send_control_mode(size_t idx, uint8_t control_mode, bool require_closed_loop) {
@@ -1622,7 +1767,11 @@ bool OdriveS1CanSystem::clear_errors_and_rearm(size_t idx) {
   meta.requires_rearm = false;
   meta.idle_sent_on_fault = false;
   meta.sent_closed_loop = false;
+  meta.logged_waiting_closed_loop = false;
   meta.homing_requested = false;
+  meta.last_logged_fault.reset();
+  meta.last_logged_axis_state.reset();
+  meta.last_logged_homing_status.reset();
   command_modes_[idx] = meta.mode_before_fault;
 
   bool ok = send_clear_errors(idx);
@@ -1682,6 +1831,19 @@ std::optional<double> OdriveS1CanSystem::read_endpoint_via_sdo(int node_id, cons
     return decode_sdo_value(ep, *raw);
   }
   return std::nullopt;
+}
+
+bool OdriveS1CanSystem::write_endpoint_via_sdo(int node_id, const EndpointInfo &ep, uint32_t raw) {
+  if (!transport_) return false;
+  can_frame frame{};
+  frame.can_id = (static_cast<uint32_t>(node_id) << 5) | 0x04; // RxSdo
+  frame.can_dlc = 8;
+  frame.data[0] = 0x01; // write opcode
+  frame.data[1] = static_cast<uint8_t>(ep.id & 0xffu);
+  frame.data[2] = static_cast<uint8_t>((ep.id >> 8) & 0xffu);
+  frame.data[3] = 0;
+  std::memcpy(&frame.data[4], &raw, sizeof(uint32_t));
+  return send_frame(frame, true, now_for_io());
 }
 
 bool OdriveS1CanSystem::run_limit_check(size_t idx) {
@@ -1865,15 +2027,22 @@ void OdriveS1CanSystem::populate_status_messages() {
 }
 
 bool OdriveS1CanSystem::start_homing() {
+  auto logger = rclcpp::get_logger("OdriveS1CanSystem");
   bool ok = true;
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
-    ok &= send_axis_state(i, AXIS_STATE_HOMING);
+    RCLCPP_INFO(
+        logger,
+        "Requesting homing for axis %s (node %u)",
+        axis_configs_[i].joint_name.c_str(), axis_can_id(i));
+    ok &= send_homing_request(i);
     command_modes_[i] = AxisControlMode::HOMING;
     runtime_metadata_[i].sent_closed_loop = false;
     runtime_metadata_[i].awaiting_closed_loop = false;
     runtime_metadata_[i].awaiting_idle = false;
     runtime_metadata_[i].homing_requested = true;
     runtime_metadata_[i].last_homing_result = "requested";
+    runtime_metadata_[i].last_logged_homing_status.reset();
+    runtime_metadata_[i].last_logged_axis_state.reset();
     axis_states_[i].homing_status = 1.0;
   }
   return ok;

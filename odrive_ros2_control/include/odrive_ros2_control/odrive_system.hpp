@@ -196,7 +196,9 @@ private:
     bool strict_bitrate = true;
     bool skip_can_validation = false;
     std::string flat_endpoints_path;
+    bool homing_use_sdo = false;
     double sdo_timeout_sec = 0.5;
+    bool log_axis_config = false;
     LimitCheckConfig limit_check_config;
     std::string can_interface;
     uint32_t can_bitrate = 0;
@@ -218,6 +220,9 @@ private:
     bool idle_sent_on_fault = false;
     uint32_t disarm_reason = 0;
     uint8_t last_axis_state = 0;
+    std::optional<uint8_t> last_logged_axis_state;
+    std::optional<uint32_t> last_logged_fault;
+    std::optional<int> last_logged_homing_status;
     std::string last_homing_result = "unknown";
     std::string fault_detail;
     enum class LimitCheckResult { UNKNOWN, OK, WARN, ERROR, SKIPPED_NO_DATA };
@@ -227,6 +232,7 @@ private:
     bool awaiting_idle = false;
     bool pending_idle_request = false;
     std::optional<uint8_t> pending_control_mode;
+    bool logged_waiting_closed_loop = false;
   };
 
   struct TransmissionData {
@@ -260,6 +266,7 @@ private:
   void latch_fault(size_t idx, uint32_t axis_error);
   bool clear_errors_and_rearm(size_t idx);
   std::optional<double> read_endpoint_via_sdo(int node_id, const EndpointInfo &ep);
+  bool write_endpoint_via_sdo(int node_id, const EndpointInfo &ep, uint32_t raw);
   double decode_sdo_value(const EndpointInfo &ep, uint32_t raw) const;
 
   // Unit conversion helpers between actuator turns/torque and joint units.
@@ -279,6 +286,7 @@ private:
   bool send_velocity_command(size_t idx, double turns_per_sec, double torque_ff);
   bool send_torque_command(size_t idx, double torque);
   bool send_clear_errors(size_t idx);
+  bool send_homing_request(size_t idx);
   bool send_frame(const can_frame &frame, bool count_budget, const rclcpp::Time &now);
   bool can_send_frame(const rclcpp::Time &now);
   bool should_log_command(size_t idx, AxisControlMode mode, double pos, double vel, double eff);
