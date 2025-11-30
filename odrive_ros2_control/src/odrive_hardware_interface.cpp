@@ -356,6 +356,11 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
   node_status_.fault_idle_on_error = to_bool(get_param("fault_idle_on_error", "", "true"), true);
   node_status_.require_rearm_after_fault = to_bool(get_param("require_rearm_after_fault", "", "true"), true);
   node_status_.debug_log_setpoints = to_bool(get_param("debug_log_setpoints", "", "false"), false);
+  node_status_.debug_log_bus_voltage = to_bool(get_param("debug_log_bus_voltage", "", "false"), false);
+  auto bus_voltage_log_period = parse_double(
+      get_param("debug_log_bus_voltage_period_sec", "", "10.0"), "debug_log_bus_voltage_period_sec");
+  if (!bus_voltage_log_period) return CallbackReturn::ERROR;
+  node_status_.bus_voltage_log_period_sec = *bus_voltage_log_period;
   node_status_.strict_bitrate = to_bool(get_param("can_bitrate_strict", "", "true"), true);
   node_status_.skip_can_validation = to_bool(get_param("skip_can_validation", "", "false"), false);
   node_status_.log_axis_config = to_bool(get_param("log_axis_config", "", "false"), false);
@@ -489,6 +494,7 @@ CallbackReturn OdriveS1CanSystem::on_init(const hardware_interface::HardwareInfo
 
   last_logged_commands_.assign(axis_configs_.size(), AxisCommand{});
   last_logged_modes_.assign(axis_configs_.size(), AxisControlMode::IDLE);
+  last_bus_voltage_log_time_by_node_.clear();
 
   hardware_status_cache_.assign(axis_configs_.size(), HardwareStatusMsg{});
   if constexpr (requires { typename HardwareStatusMsg::KeyValue{}; }) {
@@ -860,6 +866,7 @@ return_type OdriveS1CanSystem::prepare_command_mode_switch(
       case AxisControlMode::POSITION: return hardware_interface::HW_IF_POSITION;
       case AxisControlMode::VELOCITY: return hardware_interface::HW_IF_VELOCITY;
       case AxisControlMode::EFFORT: return hardware_interface::HW_IF_EFFORT;
+      case AxisControlMode::HOMING: return "homing";
       default: return "";
     }
   };
@@ -871,9 +878,11 @@ return_type OdriveS1CanSystem::prepare_command_mode_switch(
     auto stop_pos = std::find(stop_interfaces.begin(), stop_interfaces.end(), base + hardware_interface::HW_IF_POSITION);
     auto stop_vel = std::find(stop_interfaces.begin(), stop_interfaces.end(), base + hardware_interface::HW_IF_VELOCITY);
     auto stop_eff = std::find(stop_interfaces.begin(), stop_interfaces.end(), base + hardware_interface::HW_IF_EFFORT);
+    auto stop_home = std::find(stop_interfaces.begin(), stop_interfaces.end(), base + "homing");
     if ((mode == AxisControlMode::POSITION && stop_pos != stop_interfaces.end()) ||
         (mode == AxisControlMode::VELOCITY && stop_vel != stop_interfaces.end()) ||
-        (mode == AxisControlMode::EFFORT && stop_eff != stop_interfaces.end())) {
+        (mode == AxisControlMode::EFFORT && stop_eff != stop_interfaces.end()) ||
+        (mode == AxisControlMode::HOMING && stop_home != stop_interfaces.end())) {
       mode = AxisControlMode::IDLE;
     }
 
@@ -935,6 +944,14 @@ return_type OdriveS1CanSystem::perform_command_mode_switch(
     if (std::find(stop_interfaces.begin(), stop_interfaces.end(), base + hardware_interface::HW_IF_EFFORT) !=
         stop_interfaces.end()) {
       if (command_modes_[i] == AxisControlMode::EFFORT) {
+        command_modes_[i] = AxisControlMode::IDLE;
+        mode_changed = true;
+        requested_idle = true;
+      }
+    }
+    if (std::find(stop_interfaces.begin(), stop_interfaces.end(), base + "homing") !=
+        stop_interfaces.end()) {
+      if (command_modes_[i] == AxisControlMode::HOMING) {
         command_modes_[i] = AxisControlMode::IDLE;
         mode_changed = true;
         requested_idle = true;
@@ -1009,12 +1026,22 @@ return_type OdriveS1CanSystem::read(const rclcpp::Time &stamp, const rclcpp::Dur
   }
 
   publish_status_if_due(control_now);
+  for (const auto &state : axis_states_) {
+    if (state.health == AxisHealth::ERROR || state.axis_error != 0 || state.disarm_reason != 0) {
+      return return_type::ERROR;
+    }
+  }
   return return_type::OK;
 }
 
 return_type OdriveS1CanSystem::write(const rclcpp::Time &stamp, const rclcpp::Duration &) {
   if (!transport_) return return_type::ERROR;
   auto logger = rclcpp::get_logger("OdriveS1CanSystem");
+  for (const auto &state : axis_states_) {
+    if (state.health == AxisHealth::ERROR || state.axis_error != 0 || state.disarm_reason != 0) {
+      return return_type::ERROR;
+    }
+  }
   if (!active_) {
     // Allow homing requests even when inactive so controllers can trigger a homing sequence before activation.
     for (size_t i = 0; i < axis_configs_.size(); ++i) {
@@ -1196,6 +1223,35 @@ void OdriveS1CanSystem::handle_frame(const can_frame &frame, const rclcpp::Time 
       if (frame.can_dlc >= Get_Torques_msg_t::msg_length) {
         msg.decode_buf(frame.data);
         process_torque_feedback(idx, msg);
+      }
+    } break;
+    case Get_Bus_Voltage_Current_msg_t::cmd_id: {
+      Get_Bus_Voltage_Current_msg_t msg;
+      if (frame.can_dlc >= Get_Bus_Voltage_Current_msg_t::msg_length) {
+        msg.decode_buf(frame.data);
+        last_bus_voltage_ = msg.Bus_Voltage;
+        last_bus_current_ = msg.Bus_Current;
+        bus_voltage_valid_ = true;
+        if (node_status_.debug_log_bus_voltage) {
+          const auto node_id = axis_can_id(idx);
+          bool should_log = true;
+          auto it = last_bus_voltage_log_time_by_node_.find(static_cast<int>(node_id));
+          if (it != last_bus_voltage_log_time_by_node_.end() &&
+              it->second.nanoseconds() != 0 &&
+              it->second.get_clock_type() == stamp.get_clock_type()) {
+            const double age = (stamp - it->second).seconds();
+            should_log = age >= node_status_.bus_voltage_log_period_sec;
+          }
+          if (should_log) {
+            last_bus_voltage_log_time_by_node_[static_cast<int>(node_id)] = stamp;
+            const double turns = idx < axis_states_.size() ? axis_states_[idx].pos_actuator : 0.0;
+            RCLCPP_INFO(
+                rclcpp::get_logger("OdriveS1CanSystem"),
+                "Axis %s (node %u) bus_voltage=%.3fV bus_current=%.3fA turns=%.3f",
+                axis_configs_[idx].joint_name.c_str(), node_id,
+                msg.Bus_Voltage, msg.Bus_Current, turns);
+          }
+        }
       }
     } break;
     case Get_Error_msg_t::cmd_id: {
@@ -1426,6 +1482,9 @@ void OdriveS1CanSystem::update_fault_detail(size_t idx) {
      << " encoder=0x" << state.encoder_error
      << " disarm=0x" << state.disarm_reason
      << " state=0x" << static_cast<int>(state.axis_state);
+  if (bus_voltage_valid_) {
+    ss << " vbus=" << last_bus_voltage_ << "V";
+  }
   if (state.heartbeat_stale) ss << " heartbeat_stale=1";
   meta.fault_detail = ss.str();
 }
@@ -1788,6 +1847,18 @@ void OdriveS1CanSystem::latch_fault(size_t idx, uint32_t axis_error) {
   if (node_status_.fault_idle_on_error && !meta.idle_sent_on_fault && transport_) {
     send_axis_state(idx, AXIS_STATE_IDLE);
     meta.idle_sent_on_fault = true;
+  }
+  if (bus_voltage_valid_) {
+    RCLCPP_WARN(
+        rclcpp::get_logger("OdriveS1CanSystem"),
+        "Axis %s (node %u) fault latched axis_error=0x%x disarm=0x%x vbus=%.3fV ibus=%.3fA",
+        axis_configs_[idx].joint_name.c_str(), axis_can_id(idx), state.axis_error, state.disarm_reason,
+        last_bus_voltage_, last_bus_current_);
+  } else {
+    RCLCPP_WARN(
+        rclcpp::get_logger("OdriveS1CanSystem"),
+        "Axis %s (node %u) fault latched axis_error=0x%x disarm=0x%x (bus voltage unknown)",
+        axis_configs_[idx].joint_name.c_str(), axis_can_id(idx), state.axis_error, state.disarm_reason);
   }
 }
 

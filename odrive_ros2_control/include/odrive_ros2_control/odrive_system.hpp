@@ -193,6 +193,8 @@ private:
     bool fault_idle_on_error = true;
     bool require_rearm_after_fault = true;
     bool debug_log_setpoints = false;
+    bool debug_log_bus_voltage = false;
+    double bus_voltage_log_period_sec = 10.0;
     bool limits_check_use_sdo = false;
     bool strict_bitrate = true;
     bool skip_can_validation = false;
@@ -327,6 +329,7 @@ private:
   std::vector<std::optional<EndpointInfo>> endpoint_accel_;
   std::vector<AxisCommand> last_logged_commands_;
   std::vector<AxisControlMode> last_logged_modes_;
+  std::unordered_map<int, rclcpp::Time> last_bus_voltage_log_time_by_node_;
   struct RawSdoValue {
     uint32_t raw = 0;
     rclcpp::Time stamp;
@@ -343,6 +346,9 @@ private:
   bool active_ = false;
   bool configured_ = false;
   std::vector<HardwareStatusMsg> hardware_status_cache_;
+  double last_bus_voltage_ = 0.0;
+  double last_bus_current_ = 0.0;
+  bool bus_voltage_valid_ = false;
 
   struct UtilizationMetrics {
     size_t frames_this_cycle = 0;
