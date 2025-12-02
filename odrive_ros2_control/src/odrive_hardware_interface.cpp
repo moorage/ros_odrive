@@ -758,7 +758,22 @@ CallbackReturn OdriveS1CanSystem::on_activate(const rclcpp_lifecycle::State &) {
 CallbackReturn OdriveS1CanSystem::on_deactivate(const rclcpp_lifecycle::State &) {
   active_ = false;
   for (size_t i = 0; i < axis_configs_.size(); ++i) {
-    send_axis_state(i, AXIS_STATE_IDLE);
+    // Send IDLE over regular CAN and also via SDO when endpoints are available to be resilient to filtering.
+    const bool can_ok = send_axis_state(i, AXIS_STATE_IDLE);
+    const bool tried_sdo = !node_status_.flat_endpoints_path.empty();
+    if (tried_sdo && !send_axis_state_via_sdo(i, AXIS_STATE_IDLE)) {
+      RCLCPP_WARN(
+          rclcpp::get_logger("OdriveS1CanSystem"),
+          "Failed to send IDLE via SDO for joint %s (node %u)",
+          axis_configs_[i].joint_name.c_str(), axis_can_id(i));
+    } else if (!can_ok && tried_sdo) {
+      // SDO succeeded even if CAN path failed; avoid double warning.
+    } else if (!can_ok) {
+      RCLCPP_WARN(
+          rclcpp::get_logger("OdriveS1CanSystem"),
+          "Failed to send IDLE via CAN for joint %s (node %u)",
+          axis_configs_[i].joint_name.c_str(), axis_can_id(i));
+    }
     runtime_metadata_[i].sent_closed_loop = false;
   }
   return CallbackReturn::SUCCESS;
@@ -1620,6 +1635,13 @@ bool OdriveS1CanSystem::send_axis_state(size_t idx, uint32_t requested_state) {
   frame.can_dlc = msg.msg_length;
   msg.encode_buf(frame.data);
   return send_frame(frame, true, now_for_io());
+}
+
+bool OdriveS1CanSystem::send_axis_state_via_sdo(size_t idx, uint32_t requested_state) {
+  if (node_status_.flat_endpoints_path.empty()) return false;
+  auto ep = endpoint_for_axis(axis_configs_[idx].axis_index, "requested_state");
+  if (!ep) return false;
+  return write_endpoint_via_sdo(axis_configs_[idx].node_id, *ep, requested_state);
 }
 
 bool OdriveS1CanSystem::send_homing_request(size_t idx) {

@@ -286,6 +286,7 @@ private:
   int power_state_to_int(AxisPowerState state) const;
 
   bool send_axis_state(size_t idx, uint32_t requested_state);
+  bool send_axis_state_via_sdo(size_t idx, uint32_t requested_state);
   bool send_control_mode(size_t idx, uint8_t control_mode, bool require_closed_loop);
   bool send_position_command(size_t idx, double turns, double vel_ff, double torque_ff);
   bool send_velocity_command(size_t idx, double turns_per_sec, double torque_ff);
